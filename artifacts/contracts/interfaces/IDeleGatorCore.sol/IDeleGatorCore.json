@@ -1,0 +1,59 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "IDeleGatorCore",
+  "sourceName": "contracts/interfaces/IDeleGatorCore.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "ModeCode",
+          "name": "_mode",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_executionCalldata",
+          "type": "bytes"
+        }
+      ],
+      "name": "executeFromExecutor",
+      "outputs": [
+        {
+          "internalType": "bytes[]",
+          "name": "returnData",
+          "type": "bytes[]"
+        }
+      ],
+      "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "hash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "signature",
+          "type": "bytes"
+        }
+      ],
+      "name": "isValidSignature",
+      "outputs": [
+        {
+          "internalType": "bytes4",
+          "name": "magicValue",
+          "type": "bytes4"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x",
+  "deployedBytecode": "0x",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

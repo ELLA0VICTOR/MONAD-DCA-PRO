@@ -1,0 +1,183 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "ICaveatEnforcer",
+  "sourceName": "contracts/interfaces/ICaveatEnforcer.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "bytes",
+          "name": "_terms",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_args",
+          "type": "bytes"
+        },
+        {
+          "internalType": "ModeCode",
+          "name": "_mode",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_executionCalldata",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "_delegationHash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "_delegator",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_redeemer",
+          "type": "address"
+        }
+      ],
+      "name": "afterAllHook",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes",
+          "name": "_terms",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_args",
+          "type": "bytes"
+        },
+        {
+          "internalType": "ModeCode",
+          "name": "_mode",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_executionCalldata",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "_delegationHash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "_delegator",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_redeemer",
+          "type": "address"
+        }
+      ],
+      "name": "afterHook",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes",
+          "name": "_terms",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_args",
+          "type": "bytes"
+        },
+        {
+          "internalType": "ModeCode",
+          "name": "_mode",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_executionCalldata",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "_delegationHash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "_delegator",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_redeemer",
+          "type": "address"
+        }
+      ],
+      "name": "beforeAllHook",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes",
+          "name": "_terms",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_args",
+          "type": "bytes"
+        },
+        {
+          "internalType": "ModeCode",
+          "name": "_mode",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_executionCalldata",
+          "type": "bytes"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "_delegationHash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "_delegator",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_redeemer",
+          "type": "address"
+        }
+      ],
+      "name": "beforeHook",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x",
+  "deployedBytecode": "0x",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}
