@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { formatUnits, parseUnits } from 'viem';
-import toast from 'react-hot-toast';
+import { convertBalanceToUSD } from '../services/dca/priceOracle';
 
 // Services
 import { monadClient } from '../services/monad/monadClient';
+
+import { useMemo } from 'react';
 
 // Utils
 import { 
@@ -77,11 +79,15 @@ export const useMonadBalance = (address, options = {}) => {
   }, [address, autoRefresh, pollInterval]);
 
   // Token list changes
+  const normalizedTokens = useMemo(
+    ()=>[...new Set(tokens)].sort(),
+    [tokens]
+  );
   useEffect(() => {
     if (address && validateAddress(address).isValid) {
       fetchAllBalances();
     }
-  }, [tokens.join(',')]);
+  }, [normalizedTokens]);
 
   // ===== BALANCE FETCHING =====
   const fetchAllBalances = useCallback(async () => {
@@ -144,16 +150,17 @@ export const useMonadBalance = (address, options = {}) => {
   const fetchMONBalance = useCallback(async (accountAddress) => {
     try {
       const balance = await monadClient.getBalance(accountAddress);
+      const rawBalance = BigInt(balanceData.balance);
       
       return {
-        raw: balance,
-        formatted: formatUnits(balance, 18),
-        decimals: 18,
-        symbol: 'MON',
+        raw: rawBalance,
+        formatted: balanceData.formatted,
+        decimals: balanceData.decimals,
+        symbol: balanceData.symbol,
         name: 'Monad',
         isNative: true,
-        displayValue: formatTokenAmount(balance, 18, 4),
-        usdValue: null // Will be set if oracle available
+        displayValue: formatTokenAmount(rawBalance, 18, 4),
+        usdValue: await convertBalanceToUSD('MON', balance, 18)
       };
     } catch (err) {
       console.error('[useMonadBalance] MON fetch error:', err);
@@ -185,7 +192,11 @@ export const useMonadBalance = (address, options = {}) => {
         address: tokenAddress,
         isNative: false,
         displayValue: formatTokenAmount(balanceData.balance, balanceData.decimals, 4),
-        usdValue: null // Will be set if oracle available
+        usdValue: await convertBalanceToUSD(
+          tokenInfo.symbol,
+          balanceData.balance,
+          balanceData.decimals
+        )
       };
     } catch (err) {
       console.error(`[useMonadBalance] Token ${tokenInfo.symbol} fetch error:`, err);
@@ -314,7 +325,8 @@ export const useMonadBalance = (address, options = {}) => {
   const hasSufficientBalanceForGas = useCallback((gasLimit, value = 0n) => {
     const monBalance = balances.MON;
     if (!monBalance) return false;
-
+    // ⚠️ On Monad, gas is charged by gas_limit not gas_used.
+    // Ensure `gasLimit` passed here is the full gas_limit, not an estimate.
     const gasCost = BigInt(gasLimit) * MONAD_CONFIG.baseFee;
     const totalRequired = gasCost + BigInt(value);
 
@@ -369,10 +381,18 @@ export const useMonadBalance = (address, options = {}) => {
   }, []);
 
   const calculateTotalBalanceUSD = useCallback((balanceData) => {
-    // TODO: Integrate with oracle for real USD values
-    // For now, return null to indicate unavailable
-    return null;
-  }, []);
+    try {
+      let total = 0;
+      for (const symbol in balanceData) {
+        const b = balanceData[symbol];
+        if (b?.usdValue) total += b.usdValue;
+      }
+      return total;
+    } catch (err) {
+      console.error('[useMonadBalance] USD calc error:', err);
+      return null;
+    }
+  },);
 
   // ===== NETWORK STATUS =====
   const getNetworkInfo = useCallback(() => {

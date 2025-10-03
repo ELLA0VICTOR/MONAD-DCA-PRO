@@ -2,6 +2,7 @@ import { parseUnits, formatUnits, encodeFunctionData, decodeFunctionResult } fro
 import { monadClient } from '../monad/monadClient.js';
 import { validateAddress, validatePriceData } from '../../utils/validators.js';
 import { formatPrice, formatPercentage, formatDateTime } from '../../utils/formatters.js';
+import axios from 'axios';
 import { 
   CONTRACTS, 
   SUPPORTED_TOKENS, 
@@ -239,6 +240,18 @@ class PriceOracleService {
       };
     }
   }
+
+  // Fetch latest USD price for a given token symbol
+  
+ 
+
+
+
+
+
+
+
+
 
   /**
    * Get Time-Weighted Average Price (TWAP)
@@ -1068,6 +1081,37 @@ export const getPriceOracleHealth = () =>
 
 export const clearPriceCache = () => 
   priceOracle.clearCache();
+
+// Fetch latest USD price for a given token symbol
+export async function getPriceInUSD(symbol) {
+  try {
+    const token = SUPPORTED_TOKENS.find(t => t.symbol === symbol);
+    if (!token || !token.priceFeedId) throw new Error(`No price feed for ${symbol}`);
+
+    const response = await axios.get(
+      `${ORACLE_CONFIG.pythEndpoint}/v2/price_feeds/${token.priceFeedId}`
+    );
+
+    const price = response.data?.price?.price;
+    const expo = response.data?.price?.expo || -8;
+
+    if (price === undefined) throw new Error(`Price unavailable for ${symbol}`);
+
+    return price * 10 ** expo; // normalized USD price
+  } catch (err) {
+    console.error(`[priceOracle] getPriceInUSD error for ${symbol}:`, err);
+    return null;
+  }
+}
+
+// Convert a token balance (BigInt) into USD value
+export async function convertBalanceToUSD(symbol, rawBalance, decimals) {
+  const price = await getPriceInUSD(symbol);
+  if (!price) return null;
+
+  const amount = parseFloat(formatUnits(rawBalance, decimals));
+  return amount * price;
+}
 
 // Export main class, singleton, and constants
 export { 

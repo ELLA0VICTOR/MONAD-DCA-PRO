@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { formatUnits, parseUnits } from 'viem';
 
 // Services
-import { delegationService } from '../services/delegations/delegationService';
-import { delegationStorage } from '../services/delegations/delegationStorage';
+import { delegationService } from '../services/delegation/delegationService';
+import { delegationStorage } from '../services/delegation/delegationStorage';
 import { monadClient } from '../services/monad/monadClient';
 import { gasEstimator } from '../services/monad/gasEstimator';
 
@@ -83,6 +83,7 @@ export function useDelegation(smartAccount = null) {
    * Initialize delegation service and load delegations
    */
   useEffect(() => {
+    mountedRef.current = true;
     const init = async () => {
       try {
         // Initialize delegation service
@@ -141,7 +142,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to load delegations:', err);
-      setError(err.message);
+      setError(err.message || String(err));
     }
   }, [smartAccount?.address]);
 
@@ -220,7 +221,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to create delegation:', err);
-      setError(err.message);
+      setError(err.message || String(err));
       toast.error(err.message || 'Failed to create delegation', { id: 'create-delegation' });
       throw err;
     } finally {
@@ -298,7 +299,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to create swap delegation:', err);
-      setError(err.message);
+      setError(err.message || String(err));
       toast.error(err.message || 'Failed to create swap delegation', { id: 'create-swap' });
       throw err;
     } finally {
@@ -390,7 +391,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to create DCA delegation:', err);
-      setError(err.message);
+      setError(err.message || String(err));
       toast.error(err.message || 'Failed to create DCA delegation', { id: 'create-dca' });
       throw err;
     } finally {
@@ -444,7 +445,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to redeem delegation:', err);
-      setError(err.message);
+      setError(err.message || String(err));
       toast.error(err.message || 'Failed to redeem delegation', { id: 'redeem' });
       throw err;
     } finally {
@@ -490,7 +491,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to execute DCA swap:', err);
-      setError(err.message);
+      setError(err.message || String(err));
       toast.error(err.message || 'Failed to execute DCA swap', { id: 'dca-swap' });
       throw err;
     } finally {
@@ -528,7 +529,7 @@ export function useDelegation(smartAccount = null) {
 
     } catch (err) {
       console.error('Failed to revoke delegation:', err);
-      setError(err.message);
+      setError(err.message || String(err));
       toast.error(err.message || 'Failed to revoke delegation', { id: 'revoke' });
       throw err;
     } finally {
@@ -615,14 +616,15 @@ export function useDelegation(smartAccount = null) {
   const estimateRedemptionGas = useCallback(async (executions = []) => {
     try {
       const baseGas = await gasEstimator.estimateOperationGas('redeemDelegation');
-      
+      const baseLimit = Number(baseGas.standard?.gasLimit || 0);
       // Add gas for each execution
       const executionGas = executions.length * 50000;
+      const totalGasLimit = baseLimit + executionGas;
       
       return {
         ...baseGas,
-        gasLimit: baseGas.gasLimit + executionGas,
-        totalCost: (baseGas.gasLimit + executionGas) * MONAD_CONFIG.baseFee
+        gasLimit: totalGasLimit,
+        totalCost: totalGasLimit * MONAD_CONFIG.baseFee
       };
     } catch (err) {
       console.error('Failed to estimate redemption gas:', err);

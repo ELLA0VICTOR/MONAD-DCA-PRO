@@ -73,6 +73,7 @@ export function useSmartAccount() {
    * Initialize Monad client on mount
    */
   useEffect(() => {
+    mountedRef.current = true;
     const initClient = async () => {
       try {
         await monadClient.initialize();
@@ -100,31 +101,47 @@ export function useSmartAccount() {
       try {
         const storedAddress = secureStorage.retrieve('smart_account_address');
         if (!storedAddress) return;
-
+  
         setStatus(ACCOUNT_STATUS.CONNECTING);
-
-        // Check if account is deployed
+  
         const deployed = await smartAccountFactory.checkAccountDeployment(storedAddress);
-        
+  
         if (deployed) {
-          // Try to recreate account instance (requires private key)
           const encryptedKey = secureStorage.retrieve(`pk_${storedAddress}`);
           if (encryptedKey) {
-            // Note: In production, you'd prompt for password here
-            // For now, we just mark it as available for import
-            setAccountAddress(storedAddress);
-            setIsDeployed(true);
-            setStatus(ACCOUNT_STATUS.DEPLOYED);
-            toast.success(`Smart account restored: ${formatAddress(storedAddress)}`);
+            try {
+              // ⚠️ In production, prompt user for password
+              const password = prompt("Enter your password to unlock smart account");
+  
+              const privateKey = await decryptPrivateKey(encryptedKey, password);
+  
+              const account = await smartAccountFactory.importSmartAccount(
+                storedAddress,
+                privateKey,
+                { encryptPrivateKey: true, password }
+              );
+  
+              setSmartAccount(account);
+              setAccountAddress(storedAddress);
+              setIsDeployed(true);
+              setStatus(ACCOUNT_STATUS.DEPLOYED);
+  
+              toast.success(`Smart account restored: ${formatAddress(storedAddress)}`);
+            } catch (err) {
+              console.error("Failed to decrypt smart account:", err);
+              toast.error("Failed to unlock smart account, please re-import.");
+              secureStorage.remove(`pk_${storedAddress}`);
+            }
           }
         }
       } catch (err) {
-        console.error('Failed to restore smart account:', err);
+        console.error("Failed to restore smart account:", err);
       }
     };
-
+  
     restoreAccount();
   }, []);
+  
 
   /**
    * Start balance polling when account is active
@@ -134,7 +151,8 @@ export function useSmartAccount() {
       fetchBalance();
       
       // Poll balance every 10 seconds
-      balanceIntervalRef.current = setInterval(() => {
+      if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
+      balanceIntervalRef.current = setInterval(() =>{
         fetchBalance();
       }, 10000);
 
@@ -424,7 +442,10 @@ export function useSmartAccount() {
 
     try {
       const estimate = await gasEstimator.estimateOperationGas('accountDeployment');
-      return estimate;
+      return {
+        ...estimate,
+        gasLimit: Number(estimate?.standard?.gasLimit || 0)
+      };
     } catch (err) {
       console.error('Failed to estimate deployment gas:', err);
       throw err;

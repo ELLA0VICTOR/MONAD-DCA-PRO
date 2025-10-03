@@ -97,7 +97,7 @@ export const useDCAStrategy = (smartAccount) => {
       stopRefreshInterval();
       cleanupPriceSubscriptions();
     };
-  }, [smartAccount?.accountAddress]);
+  }, [smartAccount?.accountAddress, subscribeToPriceFeed]);
 
   // ===== STRATEGY LOADING =====
   const loadStrategies = useCallback(async () => {
@@ -181,10 +181,13 @@ export const useDCAStrategy = (smartAccount) => {
       );
 
       if (isMounted.current) {
-        setStrategies(prev => [...prev, strategy]);
+        setStrategies(prev => {
+          const newList = [...prev, strategy];
+          updateStats(newList);
+          return newList;
+        });
         setActiveStrategy(strategy);
-        updateStats([...strategies, strategy]);
-
+        
         // Subscribe to price feed
         subscribeToPriceFeed(strategy.fromToken, strategy.toToken);
 
@@ -316,9 +319,8 @@ export const useDCAStrategy = (smartAccount) => {
         );
 
         // Unsubscribe from price feed
-        const strategy = strategies.find(s => s.id === strategyId);
-        if (strategy) {
-          unsubscribeFromPriceFeed(strategy.fromToken, strategy.toToken);
+        if (updatedStrategy.fromToken && updatedStrategy.toToken) {
+          unsubscribeFromPriceFeed(updatedStrategy.fromToken, updatedStrategy.toToken);
         }
 
         toast.success('Strategy cancelled');

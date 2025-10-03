@@ -204,7 +204,13 @@ export const MONAD_CONFIG = {
       border: "rgba(255, 255, 255, 0.1)",
       success: "#00ff88",
       warning: "#ffaa00", 
-      error: "#ff4444"
+      error: "#ff4444",
+      zIndex: {
+        modal: 1300,
+        toast: 1400,
+        dropdown: 1200,
+        header: 1000
+      }
     },
     
     // Typography
@@ -390,3 +396,5 @@ export const MONAD_CONFIG = {
     UTILS,
     validateEnvironment
   };
+
+  
