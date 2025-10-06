@@ -1,6 +1,6 @@
 // src/App.jsx
 import React from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 
 // Layout
 import Header from './components/Layout/Header';
@@ -14,8 +14,6 @@ import DelegationManager from './components/SmartAccount/DelegationManager';
 
 // DCA Components
 import StrategyBuilder from './components/DCA/StrategyBuilder';
-import ScheduleSelector from './components/DCA/ScheduleSelector';
-import TokenSelector from './components/DCA/TokenSelector';
 import ExecutionHistory from './components/DCA/ExecutionHistory';
 
 // Dashboard Components
@@ -24,37 +22,107 @@ import ActiveStrategies from './components/Dashboard/ActiveStrategies';
 import PerformanceMetrics from './components/Dashboard/PerformanceMetrics';
 import GasTracker from './components/Dashboard/GasTracker';
 
+// Hooks
+import { useSmartAccount } from './hooks/useSmartAccount';
+
+// Protected Route Component
+const ProtectedRoute = ({ children }) => {
+  const { smartAccount, isConnected } = useSmartAccount();
+  const location = useLocation();
+
+  if (!isConnected || !smartAccount) {
+    return <Navigate to="/account/create" state={{ from: location }} replace />;
+  }
+
+  return children;
+};
+
 function App() {
   return (
     <div className="app">
       <Header />
 
-      {/* Page container handles layout width, centering, and animation */}
       <PageContainer>
         <Routes>
           {/* Default route */}
           <Route path="/" element={<Navigate to="/account/create" replace />} />
 
-          {/* Smart Account Routes */}
+          {/* ───────────────────────────────
+              Smart Account Routes (Public)
+          ─────────────────────────────── */}
           <Route path="/account/create" element={<AccountCreator />} />
-          <Route path="/account/display" element={<AccountDisplay />} />
-          <Route path="/account/delegations" element={<DelegationManager />} />
+          <Route 
+            path="/account/display" 
+            element={
+              <ProtectedRoute>
+                <AccountDisplay />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/account/delegations" 
+            element={
+              <ProtectedRoute>
+                <DelegationManager />
+              </ProtectedRoute>
+            } 
+          />
 
           {/* ───────────────────────────────
-              DCA Routes
+              DCA Routes (Protected)
           ─────────────────────────────── */}
-          <Route path="/dca/strategy" element={<StrategyBuilder />} />
-          <Route path="/dca/schedule" element={<ScheduleSelector />} />
-          <Route path="/dca/tokens" element={<TokenSelector />} />
-          <Route path="/dca/history" element={<ExecutionHistory />} />
+          <Route 
+            path="/dca/strategy" 
+            element={
+              <ProtectedRoute>
+                <StrategyBuilder />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/dca/history" 
+            element={
+              <ProtectedRoute>
+                <ExecutionHistory />
+              </ProtectedRoute>
+            } 
+          />
 
           {/* ───────────────────────────────
-              Dashboard Routes
+              Dashboard Routes (Protected)
           ─────────────────────────────── */}
-          <Route path="/dashboard/overview" element={<Overview />} />
-          <Route path="/dashboard/strategies" element={<ActiveStrategies />} />
-          <Route path="/dashboard/performance" element={<PerformanceMetrics />} />
-          <Route path="/dashboard/gas" element={<GasTracker />} />
+          <Route 
+            path="/dashboard/overview" 
+            element={
+              <ProtectedRoute>
+                <Overview />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/dashboard/strategies" 
+            element={
+              <ProtectedRoute>
+                <ActiveStrategies />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/dashboard/performance" 
+            element={
+              <ProtectedRoute>
+                <PerformanceMetrics />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/dashboard/gas" 
+            element={
+              <ProtectedRoute>
+                <GasTracker />
+              </ProtectedRoute>
+            } 
+          />
 
           {/* 404 fallback */}
           <Route
@@ -69,6 +137,18 @@ function App() {
               >
                 <h1 style={{ fontSize: '3rem', marginBottom: '1rem' }}>404</h1>
                 <p>Page not found</p>
+                <p style={{ marginTop: '1rem' }}>
+                  <a 
+                    href="/account/create" 
+                    style={{ 
+                      color: '#00ff88',
+                      textDecoration: 'none',
+                      borderBottom: '1px solid #00ff88'
+                    }}
+                  >
+                    Go to Home
+                  </a>
+                </p>
               </div>
             }
           />
