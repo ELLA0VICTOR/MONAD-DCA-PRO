@@ -1,5 +1,3 @@
-// src/components/Common/Button.jsx
-
 import { motion } from 'framer-motion';
 import { UI_CONFIG } from '../../utils/constants';
 
