@@ -83,8 +83,8 @@ function Header({ activeTab, onTabChange }) {
       <div className="header-container">
         {/* Logo */}
         <div className="header-logo">
-          <div className="logo-icon">M</div>
-          <span className="logo-text">MONAD DCA PRO</span>
+          <img src="/arrow.svg" alt="Mono Logo" className="logo-img" />
+          <span className="logo-text">Mono</span>
         </div>
 
         {/* Tab Navigation */}
@@ -104,11 +104,7 @@ function Header({ activeTab, onTabChange }) {
         <div className="header-actions">
           {isWalletConnected ? (
             <>
-              {/* Network Badge */}
-              <div className="network-badge">
-                <span className="network-dot" />
-                {MONAD_CONFIG.name}
-              </div>
+              
 
               {/* Balance (if smart account deployed) */}
               {isDeployed && balance && (

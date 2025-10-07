@@ -7,17 +7,12 @@ import { MONAD_CONFIG } from '../../utils/constants';
  * Small footprint, clean design.
  */
 function Footer() {
-  const currentYear = new Date().getFullYear();
+  
 
   return (
     <footer className="footer">
       <div className="footer-container">
-        {/* Left: Copyright */}
-        <div className="footer-left">
-          <span className="footer-text">
-            © {currentYear} Monad DCA Pro
-          </span>
-        </div>
+        
 
         {/* Center: Links */}
         <div className="footer-links">
@@ -55,20 +50,7 @@ function Footer() {
           </a>
         </div>
 
-        {/* Right: Network Info */}
-        <div className="footer-right">
-          <span className="footer-text">
-            Built on{' '}
-            <a 
-              href={MONAD_CONFIG.explorer}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="footer-highlight"
-            >
-              Monad Testnet
-            </a>
-          </span>
-        </div>
+        
       </div>
 
       {/* Testnet Warning */}
@@ -84,7 +66,7 @@ function Footer() {
           margin-top: auto;
           border-top: 1px solid var(--border);
           background: var(--bg-primary);
-          padding: 1.5rem 0 1rem;
+          padding: 0.5rem 0;
         }
 
         .footer-container {
@@ -99,8 +81,9 @@ function Footer() {
 
         .footer-text {
           font-size: 12px;
-          color: var(--text-muted);
+          color: var(--text-secondary);
           font-family: 'Inter', sans-serif;
+          font-weight: 500;
         }
 
         .footer-links {
@@ -136,12 +119,12 @@ function Footer() {
         .footer-warning {
           display: flex;
           align-items: center;
-          justify-content: center;
+          justify-content: flex-end;
           gap: 0.5rem;
-          margin-top: 1rem;
-          padding: 0.5rem 1rem;
+          margin-top: 0.3rem;
+          padding: 0.2rem 6rem 0.2rem 0;
           font-size: 11px;
-          color: var(--warning);
+          color: white;
           font-weight: 600;
           font-family: 'Inter', sans-serif;
         }
