@@ -1,5 +1,3 @@
-// src/components/Common/Card.jsx
-
 import { motion } from 'framer-motion';
 import { UI_CONFIG } from '../../utils/constants';
 

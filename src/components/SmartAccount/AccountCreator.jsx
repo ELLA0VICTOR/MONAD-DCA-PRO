@@ -59,26 +59,30 @@ const AccountCreator = ({ onAccountCreated, onCancel }) => {
     isLoading: accountLoading
   } = useSmartAccount();
 
-  // Load gas estimate on mount
-  useEffect(() => {
-    loadGasEstimate();
-  }, []);
-
   // Auto-notify on account errors
   useEffect(() => {
     if (accountError) {
       toast.error(accountError);
     }
   }, [accountError]);
-
-  const loadGasEstimate = async () => {
-    try {
-      const estimate = await estimateDeploymentGas();
-      setDeploymentGasEstimate(estimate);
-    } catch (err) {
-      console.error('Gas estimation failed:', err);
-    }
-  };
+  // Safe gas estimation logic
+  useEffect(() => {
+    const loadGasEstimate = async () => {
+      try {
+        // ✅ Prevent running before the smart account or connection is ready
+        if (!smartAccount) {
+          console.warn('[AccountCreator] Skipping gas estimation — smart account not loaded yet');
+          return;
+        }
+        const estimate = await estimateDeploymentGas(smartAccount);
+        setDeploymentGasEstimate(estimate);
+      } catch (err) {
+        console.error('Gas estimation failed:', err);
+      }
+    };
+     // Call when smartAccount changes
+     loadGasEstimate();
+  },  [smartAccount]);
 
   // Validation logic
   const validateForm = () => {

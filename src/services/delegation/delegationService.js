@@ -1,12 +1,9 @@
 import {
   createDelegation,
   redeemDelegations,
-  createRootDelegation,
-  DELEGATION_TYPES,
-  SINGLE_DEFAULT_MODE,
-  BATCH_DEFAULT_MODE
 } from '@metamask/delegation-toolkit';
-import { encodeFunctionData, parseAbi, keccak256, utf8ToBytes } from 'viem';
+import { encodeFunctionData, parseAbi, keccak256, } from 'viem';
+import { utf8ToBytes } from '@noble/hashes/utils.js';
 import { monadClient } from '../monad/monadClient.js';
 import { gasEstimator } from '../monad/gasEstimator.js';
 import { userOperationsService } from '../smartAccount/userOperations.js';
@@ -138,7 +135,7 @@ class DelegationService {
   /**
    * Create a root delegation for DCA operations
    */
-  async createRootDelegation(params) {
+  async createDelegation(params) {
     const {
       delegator,
       delegate,
@@ -157,7 +154,7 @@ class DelegationService {
       const encodedCaveats = await this.encodeCaveats(caveats);
 
       // Create delegation using MetaMask toolkit
-      const delegation = await createRootDelegation({
+      const delegation = createDelegation({
         delegator,
         delegate,
         authority: CONTRACTS.DelegationManager,
@@ -236,7 +233,7 @@ class DelegationService {
         }
       ];
 
-      const delegation = await this.createRootDelegation({
+      const delegation = await this.createDelegation({
         delegator,
         delegate,
         caveats,
@@ -295,7 +292,7 @@ class DelegationService {
         // removed token whitelist + gas_limit caveats
       ];
 
-      const delegation = await this.createRootDelegation({
+      const delegation = await this.createDelegation({
         delegator,
         delegate,
         caveats,
@@ -329,7 +326,7 @@ class DelegationService {
     const {
       delegationId,
       executions,
-      mode = SINGLE_DEFAULT_MODE,
+      mode = DELEGATION_CONFIG.modes.SINGLE_DEFAULT,
       gasOptions = {}
     } = params;
 
@@ -433,7 +430,7 @@ class DelegationService {
       const result = await this.redeemDelegation({
         delegationId,
         executions: [execution],
-        mode: SINGLE_DEFAULT_MODE,
+        mode: DELEGATION_CONFIG.modes.SINGLE_DEFAULT,
         gasOptions
       });
 

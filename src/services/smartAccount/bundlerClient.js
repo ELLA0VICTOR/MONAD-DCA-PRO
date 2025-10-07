@@ -1,11 +1,7 @@
-import { 
-  createSmartAccountClient,
-  ENTRYPOINT_ADDRESS_V06,
-  ENTRYPOINT_ADDRESS_V07
-} from 'permissionless';
+import { createSmartAccountClient } from 'permissionless';
+import { entryPoint06Address, entryPoint07Address } from 'viem/account-abstraction';
 import { createPimlicoClient } from 'permissionless/clients/pimlico';
 import { createPublicClient, http, parseAbi, getAddress, maxUint256 } from 'viem';
-import { entryPoint07Address } from 'viem/account-abstraction';
 import { 
   MONAD_CONFIG, 
   CONTRACTS, 
@@ -17,12 +13,8 @@ import { gasEstimator } from '../monad/gasEstimator.js';
 
 // ===== PIMLICO CONFIGURATION FOR MONAD =====
 
-/**
- * Get Pimlico URL for Monad testnet
- * Note: Replace with actual Monad chain ID when available
- */
 const getPimlicoUrl = (apiKey) => {
-  // For now using a placeholder chain ID - update when Monad's actual chain ID is confirmed
+  
   const monadChainId = monadTestnet.id || 'monad-testnet'; 
   return `https://api.pimlico.io/v2/10143/rpc?apikey=${apiKey}`;
 };
@@ -55,7 +47,7 @@ export const ENTRYPOINT_VERSIONS = {
 export class MonadPimlicoBundlerClient {
   constructor(options = {}) {
     const {
-      apiKey = process.env.VITE_PIMLICO_API_KEY,
+      apiKey = import.meta.env.VITE_PIMLICO_API_KEY,
       entryPointVersion = ENTRYPOINT_VERSIONS.V07,
       timeout = 30000,
       pollingInterval = 1000
@@ -127,7 +119,7 @@ export class MonadPimlicoBundlerClient {
         };
       case ENTRYPOINT_VERSIONS.V06:
         return {
-          address: ENTRYPOINT_ADDRESS_V06,
+          address: entryPoint06Address,
           version: "0.6"
         };
       default:

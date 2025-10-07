@@ -3,9 +3,17 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import App from './App';
-import './index.css'; 
+import './index.css';
 
-// Toast configuration 
+// 🧩 Wagmi (v2+)
+import { WagmiProvider } from 'wagmi';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { config as wagmiConfig } from './config/wagmiConfig';
+
+// React Query client for wagmi
+const queryClient = new QueryClient();
+
+// Toast config (unchanged)
 const toastOptions = {
   duration: 4000,
   position: 'top-right',
@@ -41,9 +49,14 @@ const toastOptions = {
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-      <Toaster toastOptions={toastOptions} />
-    </BrowserRouter>
+    {/* ✅ Modern Wagmi + React Query setup */}
+    <WagmiProvider config={wagmiConfig}>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <App />
+          <Toaster toastOptions={toastOptions} />
+        </BrowserRouter>
+      </QueryClientProvider>
+    </WagmiProvider>
   </React.StrictMode>
 );

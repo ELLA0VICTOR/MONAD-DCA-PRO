@@ -11,7 +11,7 @@ import {
 } from '../../utils/formatters';
 import { UI_CONFIG, DCA_CONFIG } from '../../utils/constants';
 
-const PerformanceMetrics = ({ strategyId = null, timeRange = '7d' }) => {
+const PerformanceMetrics = ({ strategyId = null }) => {
   const { strategies, stats: globalStats, getStrategyPerformanceData } = useDCAStrategy();
   const { balances } = useMonadBalance();
 

@@ -18,6 +18,7 @@ import { priceOracle } from './priceOracle.js';
 import { evaluateExecution } from '../ai/decisionEngine.js'
 
 
+
 function safeBase64Encode(str) {
   try {
     if (typeof Buffer !== 'undefined') {
@@ -513,6 +514,41 @@ class DCAEngineService {
       throw error;
     }
   }
+
+  /**
+ * Cancel a DCA strategy completely (cannot be resumed)
+ */
+async cancelStrategy(strategyId, reason = 'user_cancelled') {
+  try {
+    const strategy = await this.getStrategy(strategyId);
+    if (!strategy) {
+      throw new Error('Strategy not found');
+    }
+
+    // Mark as cancelled
+    strategy.state.status = STRATEGY_STATUS.CANCELLED;
+    strategy.state.updatedAt = Date.now();
+    strategy.state.cancelReason = reason;
+
+    // Stop any future executions
+    this.cancelScheduledExecution(strategyId);
+
+    // Save and persist
+    await this.saveStrategy(strategy);
+
+    console.log(`DCA strategy ${strategyId} cancelled (${reason})`);
+
+    return {
+      success: true,
+      status: STRATEGY_STATUS.CANCELLED,
+      reason
+    };
+  } catch (error) {
+    console.error('Failed to cancel DCA strategy:', error);
+    throw error;
+  }
+}
+
 
   /**
    * Resume a paused DCA strategy
@@ -1249,35 +1285,72 @@ class DCAEngineService {
 // Create singleton instance
 const dcaEngine = new DCAEngineService();
 
-// Helper functions for common operations
-export const createDCAStrategy = (strategyConfig, options) => 
-  dcaEngine.createStrategy(strategyConfig, options);
+// ===== STRATEGY PERFORMANCE ANALYTICS =====
+export const getStrategyPerformance = async (strategyId) => {
+  try {
+    const strategy = await dcaEngine.getStrategy(strategyId);
+    if (!strategy) throw new Error(`Strategy ${strategyId} not found`);
 
-export const startDCAStrategy = (strategyId, options) => 
-  dcaEngine.startStrategy(strategyId, options);
+    const historyResult = await dcaEngine.getExecutionHistory(strategyId);
+    const history = historyResult?.executions || [];
 
-export const executeDCASwap = (strategyId, options) => 
-  dcaEngine.executeSwap(strategyId, options);
+    if (history.length === 0) {
+      return {
+        strategyId,
+        totalExecutions: 0,
+        totalVolumeUSD: 0,
+        averageEntryPrice: 0,
+        realizedPnL: 0,
+        successRate: 0,
+        status: strategy.state?.status || 'inactive'
+      };
+    }
 
-export const pauseDCAStrategy = (strategyId, reason) => 
-  dcaEngine.pauseStrategy(strategyId, reason);
+    const totalExecutions = history.length;
+    const successfulExecutions = history.filter(h => h.status === 'completed').length;
+    const totalVolumeUSD = history.reduce((acc, h) => acc + (h.volumeUSD || 0), 0);
+    const avgEntryPrice = history.reduce((acc, h) => acc + (h.priceUSD || 0), 0) / totalExecutions;
+    const realizedPnL = history.reduce((acc, h) => acc + (h.profitLossUSD || 0), 0);
 
-export const resumeDCAStrategy = (strategyId) => 
-  dcaEngine.resumeStrategy(strategyId);
+    return {
+      strategyId,
+      totalExecutions,
+      totalVolumeUSD,
+      averageEntryPrice: Number(avgEntryPrice.toFixed(2)),
+      realizedPnL: Number(realizedPnL.toFixed(2)),
+      successRate: Number(((successfulExecutions / totalExecutions) * 100).toFixed(2)),
+      status: strategy.state?.status || 'active'
+    };
+  } catch (err) {
+    console.error(`[dcaEngine] getStrategyPerformance failed:`, err);
+    throw err;
+  }
+};
 
-export const getDCAStrategy = (strategyId, options) => 
-  dcaEngine.getStrategy(strategyId, options);
+// ===== MAIN EXPORTED OPERATIONS =====
+export const createDCAStrategy = (config, options) => dcaEngine.createStrategy(config, options);
+export const startDCAStrategy = (id, options) => dcaEngine.startStrategy(id, options);
+export const executeDCASwap = (id, options) => dcaEngine.executeSwap(id, options);
+export const pauseDCAStrategy = (id, reason) => dcaEngine.pauseStrategy(id, reason);
+export const resumeDCAStrategy = (id) => dcaEngine.resumeStrategy(id);
+export const getDCAStrategy = (id, options) => dcaEngine.getStrategy(id, options);
+export const listDCAStrategies = (filters, options) => dcaEngine.listStrategies(filters, options);
+export const getDCAEngineStats = () => dcaEngine.getEngineStats();
+export const emergencyStopDCA = (reason) => dcaEngine.emergencyStop(reason);
+export const cancelDCAStrategy = (id, reason) => dcaEngine.cancelStrategy(id, reason);
 
-export const listDCAStrategies = (filters, options) => 
-  dcaEngine.listStrategies(filters, options);
+// ===== SIMPLE ALIASES (for hooks & UI) =====
+export const createStrategy = createDCAStrategy;
+export const startStrategy = startDCAStrategy;
+export const executeSwap = executeDCASwap;
+export const pauseStrategy = pauseDCAStrategy;
+export const resumeStrategy = resumeDCAStrategy;
+export const cancelStrategy = cancelDCAStrategy;
+export const getStrategy = getDCAStrategy;
+export const getAllStrategies = listDCAStrategies;
+export const calculateNextExecution = (config) => dcaEngine.calculateNextExecution(config);
 
-export const getDCAEngineStats = () => 
-  dcaEngine.getEngineStats();
-
-export const emergencyStopDCA = (reason) => 
-  dcaEngine.emergencyStop(reason);
-
-// Export main class, singleton, and constants
+// ===== EXPORT CLASS & CONSTANTS =====
 export { 
   DCAEngineService,
   dcaEngine,

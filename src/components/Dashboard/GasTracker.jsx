@@ -17,7 +17,7 @@ import {
   GAS_PRICE_TIERS 
 } from '../../utils/constants';
 
-const GasTracker = ({ strategyId = null, timeRange = '7d' }) => {
+const GasTracker = ({ strategyId = null }) => {
   const { strategies, stats } = useDCAStrategy();
   const { balances } = useMonadBalance();
   

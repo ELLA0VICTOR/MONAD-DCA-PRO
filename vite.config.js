@@ -1,18 +1,18 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import path from 'path';
+import { fileURLToPath, URL } from 'node:url'; // ✅ Browser-safe replacement for `path`
 
-// https://vite.dev/config/
+// ✅ Use URL-based path resolution instead of Node `path.resolve`
 export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
-      '@components': path.resolve(__dirname, './src/components'),
-      '@services': path.resolve(__dirname, './src/services'),
-      '@hooks': path.resolve(__dirname, './src/hooks'),
-      '@utils': path.resolve(__dirname, './src/utils'),
-      '@contracts': path.resolve(__dirname, './src/contracts'),
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@components': fileURLToPath(new URL('./src/components', import.meta.url)),
+      '@services': fileURLToPath(new URL('./src/services', import.meta.url)),
+      '@hooks': fileURLToPath(new URL('./src/hooks', import.meta.url)),
+      '@utils': fileURLToPath(new URL('./src/utils', import.meta.url)),
+      '@contracts': fileURLToPath(new URL('./src/contracts', import.meta.url)),
     },
   },
   server: {
@@ -26,9 +26,9 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          'vendor': ['react', 'react-dom', 'react-router-dom'],
-          'web3': ['viem', 'wagmi', '@metamask/delegation-toolkit'],
-          'ui': ['framer-motion', 'react-hot-toast'],
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+          web3: ['viem', 'wagmi', '@metamask/delegation-toolkit'],
+          ui: ['framer-motion', 'react-hot-toast'],
         },
       },
     },

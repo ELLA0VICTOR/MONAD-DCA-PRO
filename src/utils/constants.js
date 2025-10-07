@@ -380,9 +380,32 @@ export const MONAD_CONFIG = {
     
     return true;
   };
-  
+
+  // ===== GAS PRICE TIERS =====
+export const GAS_PRICE_TIERS = {
+  conservative: {
+    label: "Conservative",
+    description: "Lowest priority — ideal for non-urgent DCA executions",
+    multiplier: 1.0,
+    confirmationTime: "≈ 2–3 seconds"
+  },
+  balanced: {
+    label: "Balanced",
+    description: "Standard priority — good balance between speed and cost",
+    multiplier: 1.1,
+    confirmationTime: "≈ 1–2 seconds"
+  },
+  aggressive: {
+    label: "Aggressive",
+    description: "High priority — for immediate execution",
+    multiplier: 1.25,
+    confirmationTime: "≈ 0.5–1 second"
+  }
+};
+
   // ===== EXPORTS =====
   export default {
+    GAS_PRICE_TIERS,
     MONAD_CONFIG,
     SMART_ACCOUNT_CONFIG,
     CONTRACTS,

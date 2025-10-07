@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { calculateNextExecution, cancelDCAStrategy } from '../services/dca/dcaEngine';
 import { formatUnits, parseUnits } from 'viem';
 import toast from 'react-hot-toast';
 
@@ -13,7 +14,6 @@ import {
   getStrategy,
   getAllStrategies,
   getStrategyPerformance,
-  calculateNextExecution,
   STRATEGY_STATUS,
   EXECUTION_STATUS
 } from '../services/dca/dcaEngine';
@@ -658,6 +658,7 @@ export const useDCAStrategy = (smartAccount) => {
 
 // ===== EXPORTS =====
 export default useDCAStrategy;
+
 
 // Export constants for convenience
 export { STRATEGY_STATUS, EXECUTION_STATUS } from '../services/dca/dcaEngine';

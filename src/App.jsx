@@ -1,6 +1,6 @@
 // src/App.jsx
 import React from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 // Layout
 import Header from './components/Layout/Header';
@@ -38,6 +38,8 @@ const ProtectedRoute = ({ children }) => {
 };
 
 function App() {
+  const navigate = useNavigate();
+
   return (
     <div className="app">
       <Header />
@@ -50,13 +52,20 @@ function App() {
           {/* ───────────────────────────────
               Smart Account Routes (Public)
           ─────────────────────────────── */}
-          <Route path="/account/create" element={<AccountCreator />} />
+          <Route 
+            path="/account/create" 
+            element={
+              <AccountCreator 
+                onAccountCreated={() => navigate('/account/display')}
+              />
+            } 
+          />
           <Route 
             path="/account/display" 
             element={
-              <ProtectedRoute>
+        
                 <AccountDisplay />
-              </ProtectedRoute>
+              
             } 
           />
           <Route 

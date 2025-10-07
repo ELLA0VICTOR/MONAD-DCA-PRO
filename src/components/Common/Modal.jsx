@@ -1,5 +1,3 @@
-// src/components/Common/Modal.jsx
-
 import { useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { UI_CONFIG } from '../../utils/constants';

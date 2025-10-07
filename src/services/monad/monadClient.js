@@ -131,6 +131,10 @@ export const createMonadWalletClient = (account, options = {}) => {
  */
 export class MonadClient {
   constructor(options = {}) {
+    if (MonadClient.instance) {
+      return MonadClient.instance; // 🔒 enforce singleton
+    }
+  
     this.publicClient = null;
     this.walletClient = null;
     this.wsClient = null;
@@ -139,17 +143,16 @@ export class MonadClient {
     this.blockNumber = 0n;
     this.gasPrice = MONAD_CONFIG.baseFee;
     
-    // Configuration
     this.config = {
       autoReconnect: true,
       maxReconnectAttempts: 5,
       reconnectDelay: 2000,
-      healthCheckInterval: 30000, // 30 seconds
+      healthCheckInterval: 30000,
       ...options
     };
-    
-    // Initialize clients
-    this.initialize();
+  
+    MonadClient.instance = this; // cache singleton
+    // 🔸 Don’t auto-initialize here — we’ll initialize on first use
   }
   
   /**
@@ -444,18 +447,18 @@ export class MonadClient {
    * @param {function} callback - Callback function for new blocks
    * @returns {function} Unsubscribe function
    */
-  subscribeToBlocks(callback = null) {
+  async subscribeToBlocks(callback = null) {
+    if (this.subscriptions.has('blocks')) return; // prevent duplicates
+  
     if (!this.wsClient) {
-      throw new Error('WebSocket client not available');
+      await this.initialize(); // now allowed
     }
-    
+  
     try {
       const unwatch = this.wsClient.watchBlockNumber({
         onBlockNumber: (blockNumber) => {
           this.blockNumber = blockNumber;
-          if (callback) {
-            callback(blockNumber);
-          }
+          if (callback) callback(blockNumber);
         },
         onError: (error) => {
           console.error('Block subscription error:', error);
@@ -464,29 +467,29 @@ export class MonadClient {
           }
         },
       });
-      
+  
       this.subscriptions.set('blocks', unwatch);
       return unwatch;
-      
     } catch (error) {
       throw new Error(`Block subscription failed: ${error.message}`);
     }
   }
+  
   
   /**
    * Subscribe to pending transactions
    * @param {function} callback - Callback function for pending transactions
    * @returns {function} Unsubscribe function
    */
-  subscribeToPendingTransactions(callback) {
-    if (!this.wsClient) {
-      throw new Error('WebSocket client not available');
-    }
-    
+  async subscribeToPendingTransactions(callback) {
     if (!callback) {
       throw new Error('Callback function is required');
     }
-    
+  
+    if (!this.wsClient) {
+      await this.initialize(); // now safe
+    }
+  
     try {
       const unwatch = this.wsClient.watchPendingTransactions({
         onTransactions: callback,
@@ -497,14 +500,14 @@ export class MonadClient {
           }
         },
       });
-      
+  
       this.subscriptions.set('pendingTxs', unwatch);
       return unwatch;
-      
     } catch (error) {
       throw new Error(`Pending transactions subscription failed: ${error.message}`);
     }
   }
+  
   
   /**
    * Health check for connection monitoring
@@ -601,13 +604,18 @@ export class MonadClient {
     this.connectionState = 'disconnected';
   }
 }
-
+MonadClient.getInstance = function() {
+  if (!MonadClient.instance) {
+    MonadClient.instance = new MonadClient();
+  }
+  return MonadClient.instance;
+};
 // ===== SINGLETON CLIENT INSTANCE =====
 
 /**
  * Default Monad client instance
  */
-export const monadClient = new MonadClient();
+export const monadClient = MonadClient.getInstance();
 
 // ===== UTILITY FUNCTIONS =====
 
