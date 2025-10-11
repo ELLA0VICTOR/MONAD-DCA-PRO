@@ -591,6 +591,28 @@ class UserOperationsService {
     }
   }
 }
+export async function sendUserOperation(account, calls, options = {}) {
+  try {
+    // Ensure the service is initialized
+    await userOperationsService.initialize();
+
+    // Create a batch operation from provided calls
+    const userOp = await userOperationsService.createBatchOperation({
+      account,
+      calls,
+      operationType: 'manual_withdrawal',
+      gasOptions: options.gasOptions || {},
+    });
+
+    // Execute the operation
+    const result = await userOperationsService.executeUserOperation(userOp, options);
+
+    return result?.transactionHash || result;
+  } catch (error) {
+    console.error('sendUserOperation failed:', error);
+    throw error;
+  }
+}
 
 // Create and export singleton instance
 export const userOperationsService = new UserOperationsService();

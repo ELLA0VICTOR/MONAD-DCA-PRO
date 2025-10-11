@@ -109,7 +109,7 @@ function Header({ activeTab, onTabChange }) {
               {/* Balance (if smart account deployed) */}
               {isDeployed && balance && (
                 <div className="balance-display">
-                  {formatTokenAmount(balance.mon, 18, 4)} MON
+                  {Number(balance.eoa.formatted).toFixed(0)} MON
                 </div>
               )}
 
@@ -182,7 +182,7 @@ function Header({ activeTab, onTabChange }) {
         </div>
       </div>
 
-      <style jsx>{`
+      <style>{`
         .header {
           position: sticky;
           top: 0;

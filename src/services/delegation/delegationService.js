@@ -84,47 +84,47 @@ class DelegationService {
   async initializeCaveatEnforcers() {
     try {
       const ZERO = '0x0000000000000000000000000000000000000000';
-
-      // Spending limit enforcer -> ERC20TransferAmountEnforcer
-      if (!CONTRACTS.ERC20TransferAmountEnforcer || CONTRACTS.ERC20TransferAmountEnforcer === ZERO) {
-        throw new Error('Missing ERC20TransferAmountEnforcer address in CONTRACTS');
+  
+      // Spending limit enforcer -> SpendingLimitEnforcer
+      if (!CONTRACTS.SpendingLimitEnforcer || CONTRACTS.SpendingLimitEnforcer === ZERO) {
+        throw new Error('Missing SpendingLimitEnforcer address in CONTRACTS');
       }
       this.caveatEnforcers.set(CAVEAT_TYPES.SPENDING_LIMIT, {
-        address: CONTRACTS.ERC20TransferAmountEnforcer,
+        address: CONTRACTS.SpendingLimitEnforcer,  // ✅ CHANGED
         encode: (terms) => this.encodeSpendingLimitCaveat(terms),
         validate: (terms) => this.validateSpendingLimit(terms)
       });
-
-      // Time range enforcer -> TimestampEnforcer
-      if (!CONTRACTS.TimestampEnforcer || CONTRACTS.TimestampEnforcer === ZERO) {
-        throw new Error('Missing TimestampEnforcer address in CONTRACTS');
+  
+      // Time range enforcer -> TimeRangeEnforcer
+      if (!CONTRACTS.TimeRangeEnforcer || CONTRACTS.TimeRangeEnforcer === ZERO) {
+        throw new Error('Missing TimeRangeEnforcer address in CONTRACTS');
       }
       this.caveatEnforcers.set(CAVEAT_TYPES.TIME_RANGE, {
-        address: CONTRACTS.TimestampEnforcer,
+        address: CONTRACTS.TimeRangeEnforcer,  // ✅ CHANGED
         encode: (terms) => this.encodeTimeRangeCaveat(terms),
         validate: (terms) => this.validateTimeRange(terms)
       });
-
-      // Recipient (target) whitelist enforcer -> AllowedTargetsEnforcer
-      if (!CONTRACTS.AllowedTargetsEnforcer || CONTRACTS.AllowedTargetsEnforcer === ZERO) {
-        throw new Error('Missing AllowedTargetsEnforcer address in CONTRACTS');
+  
+      // Recipient (target) whitelist enforcer -> RecipientWhitelistEnforcer
+      if (!CONTRACTS.RecipientWhitelistEnforcer || CONTRACTS.RecipientWhitelistEnforcer === ZERO) {
+        throw new Error('Missing RecipientWhitelistEnforcer address in CONTRACTS');
       }
       this.caveatEnforcers.set(CAVEAT_TYPES.RECIPIENT_WHITELIST, {
-        address: CONTRACTS.AllowedTargetsEnforcer,
-        encode: (terms) => this.encodeTokenWhitelistCaveat(terms), // reuse address[] encoding
+        address: CONTRACTS.RecipientWhitelistEnforcer,  // ✅ CHANGED
+        encode: (terms) => this.encodeTokenWhitelistCaveat(terms),
         validate: (terms) => this.validateTokenWhitelist(terms)
       });
-
-      // Function whitelist enforcer -> AllowedMethodsEnforcer
-      if (!CONTRACTS.AllowedMethodsEnforcer || CONTRACTS.AllowedMethodsEnforcer === ZERO) {
-        throw new Error('Missing AllowedMethodsEnforcer address in CONTRACTS');
+  
+      // Function whitelist enforcer -> FunctionWhitelistEnforcer
+      if (!CONTRACTS.FunctionWhitelistEnforcer || CONTRACTS.FunctionWhitelistEnforcer === ZERO) {
+        throw new Error('Missing FunctionWhitelistEnforcer address in CONTRACTS');
       }
       this.caveatEnforcers.set(CAVEAT_TYPES.FUNCTION_WHITELIST, {
-        address: CONTRACTS.AllowedMethodsEnforcer,
+        address: CONTRACTS.FunctionWhitelistEnforcer,  // ✅ CHANGED
         encode: (terms) => this.encodeFunctionWhitelistCaveat(terms),
         validate: (terms) => this.validateFunctionWhitelist(terms)
       });
-
+  
       console.log('Caveat enforcers initialized');
     } catch (error) {
       console.error('Failed to initialize caveat enforcers:', error);

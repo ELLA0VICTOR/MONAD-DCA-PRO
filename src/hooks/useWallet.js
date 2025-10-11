@@ -1,4 +1,4 @@
-import { useAccount, useConnect, useDisconnect } from 'wagmi';
+import { useAccount, useConnect, useDisconnect, useWalletClient, useSignMessage } from 'wagmi';
 import { injected } from 'wagmi/connectors';
 import { useEffect, useState } from 'react';
 import { formatAddress } from '../utils/formatters';
@@ -14,6 +14,8 @@ export function useWallet() {
   const { address, isConnected, chain } = useAccount();
   const { connect, isPending: isConnecting, error: connectError } = useConnect();
   const { disconnect } = useDisconnect();
+  const { data: walletClient } = useWalletClient();
+  const { signMessageAsync, isPending: isSigningMessage } = useSignMessage();
 
   const [error, setError] = useState(null);
 
@@ -57,6 +59,33 @@ export function useWallet() {
     }
   };
 
+  /**
+   * Sign a message to prove wallet ownership
+   */
+  const signMessage = async (message) => {
+    if (!address || !isConnected) {
+      throw new Error('Wallet not connected');
+    }
+    
+    try {
+      console.log('📝 Requesting signature for message:', message);
+      const signature = await signMessageAsync({ message });
+      console.log('✅ Signature received:', signature);
+      return signature;
+    } catch (err) {
+      console.error('❌ Failed to sign message:', err);
+      
+      // More specific error messages
+      if (err.message?.includes('User rejected')) {
+        throw new Error('Signature request rejected by user');
+      } else if (err.message?.includes('User denied')) {
+        throw new Error('Signature request denied by user');
+      }
+      
+      throw new Error('Failed to sign message: ' + err.message);
+    }
+  };
+
   return {
     // State
     address,
@@ -64,6 +93,8 @@ export function useWallet() {
     isConnecting,
     chain,
     error,
+    walletClient, // Expose wallet client for signing
+    isSigningMessage,
 
     // Formatted address
     shortAddress: address ? formatAddress(address, 6, 4) : null,
@@ -72,6 +103,7 @@ export function useWallet() {
     // Methods
     connect: connectWallet,
     disconnect: disconnectWallet,
+    signMessage,
 
     // Chain info
     chainId: chain?.id,

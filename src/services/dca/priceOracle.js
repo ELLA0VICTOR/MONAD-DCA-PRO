@@ -101,23 +101,31 @@ const TWAP_METHODS = {
   EMA: 'exponential',         // Exponential moving average
   TIME_WEIGHTED: 'time_weighted' // Time-weighted average price
 };
+
 async function fetchFromHermes(feedIds, useBeta = false) {
-  const baseUrl = useBeta 
-    ? "https://hermes-beta.pyth.network" 
-    : "https://hermes.pyth.network";
+  // your local proxy backend
+  const proxyBase = "http://localhost:4000/api/pyth";
 
   try {
-    const url = `${baseUrl}/v2/updates/price/latest?${feedIds.map(id => `ids[]=${id}`).join("&")}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Hermes fetch failed: ${response.status}`);
-    const data = await response.json();
-    return { success: true, data: data.parsed };
+    // Fetch each feedId through the backend proxy
+    const results = await Promise.all(
+      feedIds.map(async (id) => {
+        const url = `${proxyBase}/${id}`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Hermes proxy failed: ${response.status}`);
+        const data = await response.json();
+        return data;
+      })
+    );
+
+    // Flatten and normalize parsed data
+    const combined = results.flatMap(r => r.parsed || []);
+    return { success: true, data: combined };
   } catch (error) {
-    console.error("Hermes fetch error:", error);
+    console.error("Hermes fetch error (proxy):", error);
     return { success: false, error: error.message };
   }
 }
-
 
 /**
  * Price Oracle Service
@@ -1081,36 +1089,58 @@ export const getPriceOracleHealth = () =>
 
 export const clearPriceCache = () => 
   priceOracle.clearCache();
-
-// Fetch latest USD price for a given token symbol
+/**
+ * Fetch the latest USD price for a token symbol via backend Hermes proxy
+ */
 export async function getPriceInUSD(symbol) {
   try {
     const token = SUPPORTED_TOKENS.find(t => t.symbol === symbol);
-    if (!token || !token.priceFeedId) throw new Error(`No price feed for ${symbol}`);
+    if (!token || !token.priceFeedId) throw new Error(`No price feed configured for ${symbol}`);
 
-    const response = await axios.get(
-      `${ORACLE_CONFIG.pythEndpoint}/v2/price_feeds/${token.priceFeedId}`
+    // ✅ Always use backend proxy endpoint
+    const response = await fetch(
+      `http://localhost:4000/api/pyth/${token.priceFeedId}`
     );
 
-    const price = response.data?.price?.price;
-    const expo = response.data?.price?.expo || -8;
+    if (!response.ok) {
+      throw new Error(`Backend Hermes proxy failed: ${response.status} for ${symbol}`);
+    }
 
-    if (price === undefined) throw new Error(`Price unavailable for ${symbol}`);
+    const result = await response.json();
+    const parsed = result.parsed?.[0] || result[0] || result;
 
-    return price * 10 ** expo; // normalized USD price
+    if (!parsed?.price?.price) {
+      throw new Error(`Price not found in backend response for ${symbol}`);
+    }
+
+    const { price, expo } = parsed.price;
+    const normalized = price * Math.pow(10, expo);
+
+    return normalized; // USD price (e.g. 2000.12)
   } catch (err) {
-    console.error(`[priceOracle] getPriceInUSD error for ${symbol}:`, err);
+    console.error(`[priceOracle] getPriceInUSD error for ${symbol}:`, err.message);
     return null;
   }
 }
 
-// Convert a token balance (BigInt) into USD value
-export async function convertBalanceToUSD(symbol, rawBalance, decimals) {
-  const price = await getPriceInUSD(symbol);
-  if (!price) return null;
 
-  const amount = parseFloat(formatUnits(rawBalance, decimals));
-  return amount * price;
+export async function convertBalanceToUSD(symbol, rawBalance, decimals) {
+  try {
+    const price = await getPriceInUSD(symbol);
+    if (price === null || isNaN(price)) {
+      console.warn(`[priceOracle] Skipping USD conversion — no valid price for ${symbol}`);
+      return null;
+    }
+
+    const amount = Number(formatUnits(rawBalance, decimals));
+    const usdValue = amount * price;
+
+    // Return rounded value for UI (no long decimals)
+    return Number(usdValue.toFixed(4));
+  } catch (err) {
+    console.error(`[priceOracle] convertBalanceToUSD failed for ${symbol}:`, err.message);
+    return null;
+  }
 }
 
 // Export main class, singleton, and constants

@@ -142,6 +142,7 @@ export class MonadClient {
     this.connectionState = 'disconnected';
     this.blockNumber = 0n;
     this.gasPrice = MONAD_CONFIG.baseFee;
+    this.deploymentCache = new Map(); // initialize cache here
     
     this.config = {
       autoReconnect: true,
@@ -175,8 +176,8 @@ export class MonadClient {
       this.connectionState = 'connected';
       
       // Start monitoring
-      this.startHealthCheck();
-      this.subscribeToBlocks();
+      //this.startHealthCheck();
+      //this.subscribeToBlocks();  //i commented cause its causing my rpc to hit rate
       
     } catch (error) {
       this.connectionState = 'error';
@@ -226,104 +227,92 @@ export class MonadClient {
       throw new Error(`Failed to get network status: ${error.message}`);
     }
   }
-  
+
   /**
-   * Get account balance
-   * @param {string} address - Account address
-   * @param {string} tokenAddress - Token address (optional, defaults to native MON)
-   * @returns {object} Balance information
-   */
+ * Get account balance
+ * @param {string} address - Account address
+ * @param {string} tokenAddress - Token address (optional, defaults to native MON)
+ * @returns {object|null} Balance information or null on failure
+ */
+
+  /**
+ * Get account balance (cached for 5 minutes to prevent RPC overload)
+ */
   async getBalance(address, tokenAddress = null) {
-    if (!address) {
-      throw new Error('Address is required');
+    if (!address) throw new Error("Address is required");
+  
+    // ✅ Initialize cache if not exists
+    if (!this.balanceCache) this.balanceCache = new Map();
+  
+    // Create cache key per address + token
+    const key = tokenAddress ? `${address}_${tokenAddress}` : address;
+    const cached = this.balanceCache.get(key);
+  
+    // ✅ 5-minute cache window (300,000 ms)
+    if (cached && Date.now() - cached.timestamp < 300000) {
+      return cached.data;
     }
-    
+  
     try {
+      let data;
+  
       if (!tokenAddress) {
-        // Get native MON balance
+        // ✅ Native MON balance
         const balance = await this.publicClient.getBalance({ address });
-        
-        return {
+        data = {
           balance: balance.toString(),
           formatted: formatUnits(balance, 18),
-          symbol: 'MON',
-          decimals: 18
+          symbol: "MON",
+          decimals: 18,
         };
       } else {
-        // Get ERC-20 token balance
-        const balance = await this.publicClient.readContract({
-          address: tokenAddress,
-          abi: [
-            {
-              name: 'balanceOf',
-              type: 'function',
-              inputs: [{ name: 'account', type: 'address' }],
-              outputs: [{ name: '', type: 'uint256' }],
-              stateMutability: 'view',
-            },
-            {
-              name: 'decimals',
-              type: 'function',
-              inputs: [],
-              outputs: [{ name: '', type: 'uint8' }],
-              stateMutability: 'view',
-            },
-            {
-              name: 'symbol',
-              type: 'function',
-              inputs: [],
-              outputs: [{ name: '', type: 'string' }],
-              stateMutability: 'view',
-            },
-          ],
-          functionName: 'balanceOf',
-          args: [address],
-        });
-        
-        // Get token metadata
-        const [decimals, symbol] = await Promise.all([
+        // ✅ ERC-20 token balance
+        const [balance, decimals, symbol] = await Promise.all([
           this.publicClient.readContract({
             address: tokenAddress,
             abi: [
-              {
-                name: 'decimals',
-                type: 'function',
-                inputs: [],
-                outputs: [{ name: '', type: 'uint8' }],
-                stateMutability: 'view',
-              },
+              { name: "balanceOf", type: "function", inputs: [{ name: "account", type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" },
             ],
-            functionName: 'decimals',
+            functionName: "balanceOf",
+            args: [address],
           }),
           this.publicClient.readContract({
             address: tokenAddress,
             abi: [
-              {
-                name: 'symbol',
-                type: 'function',
-                inputs: [],
-                outputs: [{ name: '', type: 'string' }],
-                stateMutability: 'view',
-              },
+              { name: "decimals", type: "function", inputs: [], outputs: [{ type: "uint8" }], stateMutability: "view" },
             ],
-            functionName: 'symbol',
+            functionName: "decimals",
+          }),
+          this.publicClient.readContract({
+            address: tokenAddress,
+            abi: [
+              { name: "symbol", type: "function", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
+            ],
+            functionName: "symbol",
           }),
         ]);
-        
-        return {
+  
+        data = {
           balance: balance.toString(),
           formatted: formatUnits(balance, decimals),
           symbol,
           decimals,
-          tokenAddress
+          tokenAddress,
         };
       }
-      
+  
+      // ✅ Store in cache with timestamp
+      this.balanceCache.set(key, { data, timestamp: Date.now() });
+      return data;
+  
     } catch (error) {
-      throw new Error(`Failed to get balance: ${error.message}`);
+      console.warn(`monadClient.getBalance failed for ${address} ${tokenAddress || ""}:`, error?.message || error);
+      return cached?.data || null; // fallback to last cached value if exists
     }
   }
   
+  
+
   /**
    * Estimate gas for a transaction
    * @param {object} transaction - Transaction parameters

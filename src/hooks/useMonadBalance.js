@@ -55,11 +55,7 @@ export const useMonadBalance = (address, options = {}) => {
   const isMounted = useRef(true);
   const previousBalances = useRef({});
 
-  // ===== COMPUTED STATE =====
-  const hasBalance = Object.values(balances).some(b => b?.raw > 0n);
-  const hasSufficientMON = (balances.MON?.raw || 0n) > parseUnits('0.01', 18); // Min 0.01 MON
-  const totalBalanceUSD = calculateTotalBalanceUSD(balances);
-
+ 
   // ===== INITIALIZATION =====
   useEffect(() => {
     isMounted.current = true;
@@ -93,9 +89,19 @@ export const useMonadBalance = (address, options = {}) => {
   const fetchAllBalances = useCallback(async () => {
     if (!address) return;
 
+    if (!monadClient.publicClient) {
+      console.warn('[useMonadBalance] Monad client not ready yet - skipping balance fetch.');
+      return;
+    }
+
+    // Prevent overlapping fetchAllBalances invocations
+    if (fetchAllBalances._isFetching) return;
+    fetchAllBalances._isFetching = true;
+
     const validation = validateAddress(address);
     if (!validation.isValid) {
       setError('Invalid address');
+      fetchAllBalances._isFetching = false;
       return;
     }
 
@@ -143,24 +149,52 @@ export const useMonadBalance = (address, options = {}) => {
       if (isMounted.current) {
         setIsLoading(false);
       }
+      fetchAllBalances._isFetching = false;
     }
   }, [address, tokens]);
 
   // ===== MON BALANCE =====
   const fetchMONBalance = useCallback(async (accountAddress) => {
+    if (!accountAddress) {
+      return {
+        raw: 0n,
+        formatted: '0',
+        decimals: 18,
+        symbol: 'MON',
+        name: 'Monad',
+        isNative: true,
+        displayValue: '0',
+        usdValue: null,
+      };
+    }
+
     try {
-      const balance = await monadClient.getBalance(accountAddress);
-      const rawBalance = BigInt(balanceData.balance);
-      
+      const balanceResp = await monadClient.getBalance(accountAddress);
+      if (!balanceResp || !balanceResp.balance) {
+        return {
+          raw: 0n,
+          formatted: '0',
+          decimals: 18,
+          symbol: 'MON',
+          name: 'Monad',
+          isNative: true,
+          displayValue: '0',
+          usdValue: null,
+        };
+      }
+
+      const rawBalance = BigInt(balanceResp.balance.toString ? balanceResp.balance.toString() : balanceResp.balance);
+      const formatted = balanceResp.formatted ?? formatUnits(rawBalance, 18);
+
       return {
         raw: rawBalance,
-        formatted: balanceData.formatted,
-        decimals: balanceData.decimals,
-        symbol: balanceData.symbol,
+        formatted,
+        decimals: 18,
+        symbol: balanceResp.symbol || 'MON',
         name: 'Monad',
         isNative: true,
         displayValue: formatTokenAmount(rawBalance, 18, 4),
-        usdValue: await convertBalanceToUSD('MON', balance, 18)
+        usdValue: await convertBalanceToUSD('MON', rawBalance, 18)
       };
     } catch (err) {
       console.error('[useMonadBalance] MON fetch error:', err);
@@ -177,6 +211,7 @@ export const useMonadBalance = (address, options = {}) => {
       };
     }
   }, []);
+
 
   // ===== ERC-20 BALANCE =====
   const fetchTokenBalance = useCallback(async (accountAddress, tokenAddress, tokenInfo) => {
@@ -392,7 +427,13 @@ export const useMonadBalance = (address, options = {}) => {
       console.error('[useMonadBalance] USD calc error:', err);
       return null;
     }
-  },);
+  },[]);
+
+   // ===== COMPUTED STATE =====
+   const hasBalance = Object.values(balances).some(b => b?.raw > 0n);
+   const hasSufficientMON = (balances.MON?.raw || 0n) > parseUnits('0.01', 18); // Min 0.01 MON
+   const totalBalanceUSD = calculateTotalBalanceUSD(balances);
+ 
 
   // ===== NETWORK STATUS =====
   const getNetworkInfo = useCallback(() => {
@@ -404,6 +445,12 @@ export const useMonadBalance = (address, options = {}) => {
       isTestnet: true
     };
   }, []);
+  useEffect(() => {
+    window.refreshBalances = refreshTokenBalance;
+    return () => {
+    delete window.refreshBalances;
+  };
+}, [refreshTokenBalance]);
 
   // ===== EXPORTS =====
   return {
@@ -412,6 +459,7 @@ export const useMonadBalance = (address, options = {}) => {
     isLoading,
     error,
     lastUpdate,
+    
 
     // Computed
     hasBalance,

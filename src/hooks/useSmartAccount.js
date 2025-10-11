@@ -12,8 +12,7 @@ import { monadClient } from '../services/monad/monadClient';
 import { gasEstimator } from '../services/monad/gasEstimator';
 
 // Utils
-import { validateAddress } from '../utils/validators';
-import { formatAddress, formatTokenAmount } from '../utils/formatters';
+import { formatAddress } from '../utils/formatters';
 import { MONAD_CONFIG, SMART_ACCOUNT_CONFIG } from '../utils/constants';
 
 // Hooks
@@ -32,29 +31,31 @@ const ACCOUNT_STATUS = {
 };
 
 /**
- * useSmartAccount Hook (EOA-Based)
+ * useSmartAccount Hook (EOA-Based with Auto-Deploy)
  * 
  * Manages MetaMask Smart Accounts linked to EOA wallet.
- * No more password-based creation - uses EOA signatures.
  * 
  * Features:
- * - Create smart accounts via EOA signature
+ * - Create smart accounts via EOA signature + AUTO-DEPLOY immediately
  * - Load all smart accounts for connected EOA
- * - Deploy accounts on-chain
  * - Track deployment status and balances
  * - Multi-account support (switch between accounts)
  */
 export function useSmartAccount() {
-  const { address: eoaAddress, isConnected: isWalletConnected } = useWallet();
+  const { 
+    address: eoaAddress, 
+    isConnected: isWalletConnected,
+    walletClient,
+    signMessage 
+  } = useWallet();
 
   // Smart account state
-  const [smartAccounts, setSmartAccounts] = useState([]); // All accounts for this EOA
-  const [activeAccount, setActiveAccount] = useState(null); // Currently selected account
+  const [smartAccounts, setSmartAccounts] = useState([]);
+  const [activeAccount, setActiveAccount] = useState(null);
   const [status, setStatus] = useState(ACCOUNT_STATUS.DISCONNECTED);
   const [balance, setBalance] = useState({
-    mon: '0',
-    formatted: '0',
-    loading: false
+    eoa: { raw: '0', formatted: '0', loading: false },
+    smart: { raw: '0', formatted: '0', loading: false }
   });
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -68,24 +69,19 @@ export function useSmartAccount() {
    */
   useEffect(() => {
     mountedRef.current = true;
-    const initClient = async () => {
-      try {
-        await monadClient.initialize();
-        console.log('✅ Monad client initialized');
-      } catch (err) {
-        console.error('❌ Failed to initialize Monad client:', err);
-      }
-    };
-
-    initClient();
-
+  
+    if (monadClient.connectionState !== 'connected') {
+      monadClient.initialize()
+        .then(() => console.log('✅ Monad client initialized'))
+        .catch(err => console.error('❌ Failed to initialize Monad client:', err));
+    }
+  
     return () => {
       mountedRef.current = false;
-      if (balanceIntervalRef.current) {
-        clearInterval(balanceIntervalRef.current);
-      }
+      if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
     };
   }, []);
+  
 
   /**
    * Load smart accounts when EOA connects
@@ -102,24 +98,107 @@ export function useSmartAccount() {
   }, [eoaAddress, isWalletConnected]);
 
   /**
-   * Start balance polling for active account
+   * Throttled, guarded fetchBalance to avoid overlapping requests and 429s.
+   * Also fixes undefined property access (monadClient returns { balance, formatted, ... }).
+   */
+
+  const fetchBalances = useCallback(async () => {
+    if (!eoaAddress) return;
+    if (!activeAccount?.address) return;
+  
+    if (fetchBalances._isFetching) return;
+    fetchBalances._isFetching = true;
+  
+    try {
+      setBalance(prev => ({
+        eoa: { ...prev.eoa, loading: true },
+        smart: { ...prev.smart, loading: true }
+      }));
+  
+      // 🟣 Fetch EOA balance
+      let eoaData = null;
+      try {
+        eoaData = await monadClient.getBalance(eoaAddress);
+      } catch (err) {
+        console.warn('EOA getBalance failed:', err);
+      }
+  
+      // 🟣 Fetch Smart Account balance
+      let smartData = null;
+      try {
+        smartData = await monadClient.getBalance(activeAccount.address);
+      } catch (err) {
+        console.warn('Smart account getBalance failed:', err);
+      }
+  
+      if (!mountedRef.current) return;
+  
+      const eoaRaw = BigInt(eoaData?.balance ?? 0);
+      const smartRaw = BigInt(smartData?.balance ?? 0);
+  
+      const eoaFormatted = eoaData?.formatted ?? formatUnits(eoaRaw, MONAD_CONFIG.decimals);
+      const smartFormatted = smartData?.formatted ?? formatUnits(smartRaw, MONAD_CONFIG.decimals);
+  
+      setBalance({
+        eoa: { raw: eoaRaw.toString(), formatted: eoaFormatted, loading: false },
+        smart: { raw: smartRaw.toString(), formatted: smartFormatted, loading: false }
+      });
+    } catch (err) {
+      console.error('fetchBalances error:', err);
+      setBalance(prev => ({
+        eoa: { ...prev.eoa, loading: false },
+        smart: { ...prev.smart, loading: false }
+      }));
+    } finally {
+      fetchBalances._isFetching = false;
+    }
+  }, [eoaAddress, activeAccount]);
+  
+  /**
+   * Start polling for activeAccount balance.
+   * Use a single interval (15s) and ensure cleanup on unmount / account change.
    */
   useEffect(() => {
-    if (activeAccount?.address && activeAccount?.deploymentState === 'deployed') {
-      fetchBalance();
-      
-      if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
-      balanceIntervalRef.current = setInterval(() => {
-        fetchBalance();
-      }, 10000); // Poll every 10s
-
-      return () => {
-        if (balanceIntervalRef.current) {
-          clearInterval(balanceIntervalRef.current);
-        }
-      };
+    //  Clear any previous interval first
+    if (balanceIntervalRef.current) {
+      clearInterval(balanceIntervalRef.current);
+      balanceIntervalRef.current = null;
     }
-  }, [activeAccount]);
+  
+    //  Guard: only start polling if both EOA and smart account exist
+    if (!activeAccount?.address || !eoaAddress) return;
+  
+    let exited = false;
+  
+    const startPolling = async () => {
+      //  Run one immediate fetch when account changes or mounts
+      try {
+        await fetchBalances();
+      } catch (err) {
+        console.warn('[useSmartAccount] Initial balance fetch failed:', err);
+      }
+  
+      if (exited) return;
+  
+      //  Poll 
+      balanceIntervalRef.current = setInterval(() => {
+        fetchBalances().catch(err => {
+          console.warn('[useSmartAccount] Poll fetch failed:', err);
+        });
+      }, 360000);
+    };
+  
+    startPolling();
+  
+    return () => {
+      exited = true;
+      if (balanceIntervalRef.current) {
+        clearInterval(balanceIntervalRef.current);
+        balanceIntervalRef.current = null;
+      }
+    };
+  }, [eoaAddress, activeAccount, fetchBalances]);
+  
 
   /**
    * Load all smart accounts for connected EOA
@@ -135,12 +214,12 @@ export function useSmartAccount() {
       
       // Auto-select first account if exists
       if (accounts.length > 0 && !activeAccount) {
-        setActiveAccount(accounts[0]);
-        setStatus(
-          accounts[0].deploymentState === 'deployed' 
-            ? ACCOUNT_STATUS.DEPLOYED 
-            : ACCOUNT_STATUS.CONNECTED
-        );
+        const firstAccount = accounts[0];
+        setActiveAccount(firstAccount);
+        
+        // Check deployment status
+        const isDeployed = await checkDeployment(firstAccount.address);
+        setStatus(isDeployed ? ACCOUNT_STATUS.DEPLOYED : ACCOUNT_STATUS.CONNECTED);
       } else if (accounts.length === 0) {
         setStatus(ACCOUNT_STATUS.DISCONNECTED);
       }
@@ -155,11 +234,15 @@ export function useSmartAccount() {
   }, [eoaAddress, activeAccount]);
 
   /**
-   * Create new smart account (EOA-based)
+   * Create new smart account (EOA-based) + AUTO-DEPLOY
    */
-  const createSmartAccount = useCallback(async (eoaAccount) => {
+  const createSmartAccount = useCallback(async () => {
     if (!eoaAddress) {
       throw new Error('EOA wallet not connected');
+    }
+
+    if (!walletClient) {
+      throw new Error('Wallet client not available. Please ensure your wallet is connected.');
     }
 
     try {
@@ -167,10 +250,68 @@ export function useSmartAccount() {
       setError(null);
       setStatus(ACCOUNT_STATUS.CONNECTING);
 
+      console.log('🚀 Starting smart account creation for:', eoaAddress);
       toast.loading('Creating smart account...', { id: 'create-account' });
 
-      // Create account via factory
-      const account = await createNewSmartAccount(eoaAccount);
+      // Step 1: Request signature (optional - with timeout)
+      try {
+        const message = `Sign this message to create a smart account.\n\nAddress: ${eoaAddress}\nTimestamp: ${Date.now()}`;
+        const signaturePromise = signMessage(message);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Signature timeout')), 30000)
+        );
+        
+        await Promise.race([signaturePromise, timeoutPromise]);
+        toast.loading('Signature verified. Creating account...', { id: 'create-account' });
+      } catch (signError) {
+        if (signError.message?.includes('rejected') || signError.message?.includes('denied')) {
+          toast.error('Signature request was rejected', { id: 'create-account' });
+          throw new Error('User rejected signature request');
+        }
+        console.warn('⚠️ Signature failed/timed out, continuing anyway');
+      }
+
+      // Step 2: Get viem account from wallet client
+      const eoaAccount = walletClient.account;
+      
+      if (!eoaAccount || !eoaAccount.address) {
+        throw new Error('Invalid wallet account. Please reconnect your wallet.');
+      }
+
+      // Step 3: Create account via factory
+      toast.loading('Generating smart account...', { id: 'create-account' });
+      const account = await createNewSmartAccount(eoaAccount, walletClient);
+
+      console.log('✅ Smart account created:', account.address);
+
+      // Step 4: AUTO-DEPLOY IMMEDIATELY 🚀
+      toast.loading('Deploying smart account...', { id: 'create-account' });
+      setStatus(ACCOUNT_STATUS.DEPLOYING);
+
+      try {
+        const receipt = await smartAccountFactory.deploySmartAccount(account);
+        
+        console.log('✅ Smart account deployed:', receipt.transactionHash);
+        
+        // Update account with deployment info
+        account.deploymentState = 'deployed';
+        account.deploymentTxHash = receipt.transactionHash;
+        
+        setStatus(ACCOUNT_STATUS.DEPLOYED);
+        
+      } catch (deployError) {
+        console.error('❌ Deployment failed:', deployError);
+        
+        // Even if deployment fails, account is still created (counterfactual)
+        // Just mark it as not deployed
+        account.deploymentState = 'not_deployed';
+        setStatus(ACCOUNT_STATUS.CONNECTED);
+        
+        toast.error('Account created but deployment failed. You can try again later.', { 
+          id: 'create-account',
+          duration: 5000 
+        });
+      }
 
       if (!mountedRef.current) return;
 
@@ -179,68 +320,89 @@ export function useSmartAccount() {
 
       // Set as active account
       setActiveAccount(account);
-      setStatus(account.isDeployed ? ACCOUNT_STATUS.DEPLOYED : ACCOUNT_STATUS.CONNECTED);
 
-      toast.success(`Smart account created: ${formatAddress(account.address)}`, { id: 'create-account' });
+      if (account.deploymentState === 'deployed') {
+        toast.success(`Smart account created & deployed: ${formatAddress(account.address)}`, { 
+          id: 'create-account' 
+        });
+      } else {
+        toast.success(`Smart account created: ${formatAddress(account.address)}`, { 
+          id: 'create-account' 
+        });
+      }
 
       return account;
 
     } catch (err) {
-      console.error('Failed to create smart account:', err);
+      console.error('❌ Failed to create smart account:', err);
       setError(err.message || 'Failed to create smart account');
       setStatus(ACCOUNT_STATUS.ERROR);
-      toast.error(err.message || 'Failed to create smart account', { id: 'create-account' });
+      
+      if (!err.message?.includes('rejected')) {
+        toast.error(err.message || 'Failed to create smart account', { id: 'create-account' });
+      }
       throw err;
     } finally {
       setIsLoading(false);
     }
-  }, [eoaAddress, loadAccountsForEOA]);
+  }, [eoaAddress, walletClient, signMessage, loadAccountsForEOA]);
 
   /**
-   * Deploy active smart account
-   */
+ * Deploy smart account manually (if it failed during creation)
+ */ 
   const deploySmartAccount = useCallback(async (firstTransaction = null) => {
-    if (!activeAccount) {
-      throw new Error('No smart account selected');
+    if (!activeAccount || !activeAccount.address) {
+      throw new Error('No smart account selected or invalid account.');
     }
-
-    if (activeAccount.deploymentState === 'deployed') {
-      throw new Error('Account already deployed');
-    }
-
     try {
       setIsLoading(true);
       setError(null);
       setStatus(ACCOUNT_STATUS.DEPLOYING);
-
       toast.loading('Deploying smart account...', { id: 'deploy' });
-
-      const receipt = await smartAccountFactory.deploySmartAccount(
-        activeAccount,
-        firstTransaction
-      );
-
-      if (!mountedRef.current) return;
-
-      // Update account state
-      const updatedAccount = {
-        ...activeAccount,
+  
+      // ✅ 1. Rehydrate full account instance if not already present
+      let fullAccount = activeAccount;
+      if (!activeAccount.account) {
+        console.log('🧩 Rehydrating smart account instance before deployment...');
+        const eoaAccount = walletClient?.account;
+        if (!eoaAccount) throw new Error('Missing EOA signer for rehydration');
+  
+        // Recreate smart account object using factory (but don’t auto-store again)
+        const recreated = await smartAccountFactory.createSmartAccount(eoaAccount, walletClient, {
+          deploySalt: activeAccount.deploySalt,
+        });
+  
+        // Match with the same address
+        if (recreated.address.toLowerCase() !== activeAccount.address.toLowerCase()) {
+          console.warn('⚠️ Rehydrated address mismatch:', recreated.address);
+        }
+        fullAccount = { ...activeAccount, ...recreated };
+      }
+  
+      // ✅ 2. Double-check deployment status
+      const alreadyDeployed = await smartAccountFactory.checkAccountDeployment(fullAccount.address);
+      if (alreadyDeployed) {
+        toast.success('Smart account already deployed!');
+        setStatus(ACCOUNT_STATUS.DEPLOYED);
+        return { alreadyDeployed: true };
+      }
+      // ✅ 3. Deploy using factory
+      console.log('🚀 Deploying via SmartAccountFactory:', fullAccount.address);
+      const txHash = await smartAccountFactory.deploySmartAccount(fullAccount, firstTransaction);
+      console.log('✅ Deployment txHash:', txHash);
+      // ✅ 4. Update state
+      setActiveAccount({
+        ...fullAccount,
         deploymentState: 'deployed',
-        deploymentTxHash: receipt.transactionHash
-      };
-
-      setActiveAccount(updatedAccount);
+        deploymentTxHash: txHash,
+      });
       setStatus(ACCOUNT_STATUS.DEPLOYED);
-
-      // Reload accounts
+  
       await loadAccountsForEOA();
-
+      await fetchBalances();
+  
       toast.success('Smart account deployed successfully!', { id: 'deploy' });
-
-      await fetchBalance();
-
-      return receipt;
-
+      return txHash;
     } catch (err) {
       console.error('Failed to deploy smart account:', err);
       setError(err.message || 'Failed to deploy smart account');
@@ -250,7 +412,8 @@ export function useSmartAccount() {
     } finally {
       setIsLoading(false);
     }
-  }, [activeAccount, loadAccountsForEOA]);
+  }, [activeAccount, walletClient, loadAccountsForEOA, fetchBalances]);
+
 
   /**
    * Switch active account
@@ -259,52 +422,30 @@ export function useSmartAccount() {
     const account = smartAccounts.find(acc => acc.address === accountAddress);
     if (account) {
       setActiveAccount(account);
-      setStatus(
-        account.deploymentState === 'deployed' 
-          ? ACCOUNT_STATUS.DEPLOYED 
-          : ACCOUNT_STATUS.CONNECTED
-      );
+      
+      // Check deployment status
+      checkDeployment(account.address).then(isDeployed => {
+        setStatus(isDeployed ? ACCOUNT_STATUS.DEPLOYED : ACCOUNT_STATUS.CONNECTED);
+      });
+      
       toast.success(`Switched to ${formatAddress(accountAddress)}`);
     }
   }, [smartAccounts]);
 
-  /**
-   * Fetch MON balance for active account
-   */
-  const fetchBalance = useCallback(async () => {
-    if (!activeAccount?.address) return;
-
-    try {
-      setBalance(prev => ({ ...prev, loading: true }));
-
-      const balanceData = await monadClient.getBalance(activeAccount.address);
-      
-      if (!mountedRef.current) return;
-
-      setBalance({
-        mon: balanceData.value.toString(),
-        formatted: formatUnits(balanceData.value, MONAD_CONFIG.decimals),
-        loading: false
-      });
-    } catch (err) {
-      console.error('Failed to fetch balance:', err);
-      if (mountedRef.current) {
-        setBalance(prev => ({ ...prev, loading: false }));
-      }
-    }
-  }, [activeAccount]);
+   
 
   /**
    * Check deployment status
    */
-  const checkDeployment = useCallback(async () => {
-    if (!activeAccount?.address) return false;
+  const checkDeployment = useCallback(async (address = null) => {
+    const accountAddress = address || activeAccount?.address;
+    if (!accountAddress) return false;
 
     try {
-      const deployed = await smartAccountFactory.checkAccountDeployment(activeAccount.address);
+      const deployed = await smartAccountFactory.checkAccountDeployment(accountAddress);
       
-      if (deployed && activeAccount.deploymentState !== 'deployed') {
-        // Update local state
+      // Update status if checking active account
+      if (accountAddress === activeAccount?.address && deployed && activeAccount.deploymentState !== 'deployed') {
         const updatedAccount = {
           ...activeAccount,
           deploymentState: 'deployed'
@@ -350,6 +491,8 @@ export function useSmartAccount() {
       formattedAddress: formatAddress(activeAccount.address),
       isDeployed: activeAccount.deploymentState === 'deployed',
       balance: balance.formatted,
+      eoaBalance: balance.eoa,
+      smartAccountBalance: balance.smart,
       balanceWei: balance.mon,
       implementation: SMART_ACCOUNT_CONFIG.implementation,
       chainId: MONAD_CONFIG.chainId,
@@ -381,8 +524,8 @@ export function useSmartAccount() {
 
   return {
     // State
-    smartAccounts, // All accounts for this EOA
-    activeAccount, // Currently selected account
+    smartAccounts,
+    activeAccount,
     accountAddress: activeAccount?.address || null,
     status,
     isDeployed: activeAccount?.deploymentState === 'deployed',
@@ -397,7 +540,7 @@ export function useSmartAccount() {
     switchAccount,
     checkDeployment,
     disconnect,
-    fetchBalance,
+    fetchBalances,
     getAccountInfo,
     estimateDeploymentGas,
     loadAccountsForEOA,

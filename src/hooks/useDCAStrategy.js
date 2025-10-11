@@ -83,21 +83,6 @@ export const useDCAStrategy = (smartAccount) => {
   const hasActiveStrategies = strategies.some(s => s.status === STRATEGY_STATUS.ACTIVE);
   const canCreateStrategy = smartAccount?.isDeployed && !isLoading;
 
-  // ===== INITIALIZATION =====
-  useEffect(() => {
-    isMounted.current = true;
-    
-    if (smartAccount?.accountAddress) {
-      loadStrategies();
-      startRefreshInterval();
-    }
-
-    return () => {
-      isMounted.current = false;
-      stopRefreshInterval();
-      cleanupPriceSubscriptions();
-    };
-  }, [smartAccount?.accountAddress, subscribeToPriceFeed]);
 
   // ===== STRATEGY LOADING =====
   const loadStrategies = useCallback(async () => {
@@ -417,6 +402,22 @@ export const useDCAStrategy = (smartAccount) => {
       console.error('[useDCAStrategy] Price subscription error:', err);
     }
   }, []);
+
+  // ===== INITIALIZATION =====
+  useEffect(() => {
+    isMounted.current = true;
+    
+    if (smartAccount?.accountAddress) {
+      loadStrategies();
+      startRefreshInterval();
+    }
+
+    return () => {
+      isMounted.current = false;
+      stopRefreshInterval();
+      cleanupPriceSubscriptions();
+    };
+  }, [smartAccount?.accountAddress, subscribeToPriceFeed]);
 
   const unsubscribeFromPriceFeed = useCallback((fromToken, toToken) => {
     const pairKey = `${fromToken}-${toToken}`;

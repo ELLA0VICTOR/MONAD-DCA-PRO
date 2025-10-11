@@ -61,7 +61,7 @@ function Footer() {
         <span>Testnet Only - Do not use real funds</span>
       </div>
 
-      <style jsx>{`
+      <style>{`
         .footer {
           margin-top: auto;
           border-top: 1px solid var(--border);
