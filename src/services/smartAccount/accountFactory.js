@@ -3,21 +3,24 @@ import {
   toMetaMaskSmartAccount,
 } from '@metamask/delegation-toolkit';
 import { getAddress, keccak256, encodePacked } from 'viem';
+import { toPackedUserOperation } from 'viem/account-abstraction';
 import { 
   MONAD_CONFIG, 
   SMART_ACCOUNT_CONFIG, 
   CONTRACTS, 
-  GAS_LIMITS 
+  GAS_LIMITS,
+  FASTLANE_CONFIG 
 } from '../../utils/constants.js';
 import { monadClient } from '../monad/monadClient.js';
 import { gasEstimator } from '../monad/gasEstimator.js';
+import { preparePaymasterContext } from './paymasterHelper.js';
 
 // ===== SMART ACCOUNT TYPES =====
 
 export const ACCOUNT_TYPES = {
-  HYBRID: 'Hybrid',        // Supports EOA + passkeys
-  PASSKEY: 'Passkey',      // Passkey only
-  EOA: 'EOA'               // EOA only (for testing)
+  HYBRID: 'Hybrid',
+  PASSKEY: 'Passkey',
+  EOA: 'EOA'
 };
 
 export const DEPLOYMENT_STATE = {
@@ -29,10 +32,6 @@ export const DEPLOYMENT_STATE = {
 
 // ===== SMART ACCOUNT FACTORY CLASS =====
 
-/**
- * Factory for creating and managing MetaMask Smart Accounts
- * Now uses EOA from wagmi instead of password-based creation
- */
 export class SmartAccountFactory {
   constructor(client = monadClient) {
     this.client = client;
@@ -48,193 +47,219 @@ export class SmartAccountFactory {
       deploymentTimeout: 60000,
     };
   }
-  /**
- * Create a new smart account linked to EOA
- * @param {object} eoaAccount - Viem account from wagmi (JSON-RPC account)
- * @param {object} walletClient - Wallet client for signing (REQUIRED for JSON-RPC accounts)
- * @param {object} options - Creation options
- * @returns {Promise<object>} Smart account instance
- */
-async createSmartAccount(eoaAccount, walletClient = null, options = {}) {
-  const {
-    implementation = ACCOUNT_TYPES.HYBRID,
-    deploySalt = null,
-  } = options;
-  
-  try {
-    // Validate EOA account
-    if (!eoaAccount || !eoaAccount.address) {
-      throw new Error('Valid EOA account is required');
-    }
+
+  async createSmartAccount(eoaAccount, walletClient = null, options = {}) {
+    const {
+      implementation = ACCOUNT_TYPES.HYBRID,
+      deploySalt = null,
+    } = options;
     
-    console.log('🔧 Creating smart account with EOA:', eoaAccount.address);
-    console.log('🔧 Account type:', eoaAccount.type);
-    
-    // Calculate deterministic salt
-    const salt = deploySalt || this.generateDeterministicSalt(eoaAccount.address);
-    
-    // ✅ FIXED: Proper signer configuration based on account type
-    let signerConfig;
-    
-    if (eoaAccount.type === 'json-rpc') {
-      // JSON-RPC accounts (MetaMask) - MUST use walletClient
-      if (!walletClient) {
-        throw new Error('walletClient is required for JSON-RPC accounts');
+    try {
+      if (!eoaAccount || !eoaAccount.address) {
+        throw new Error('Valid EOA account is required');
       }
       
-      console.log('📝 Using wallet client signer for JSON-RPC account');
+      console.log('🔧 Creating smart account with EOA:', eoaAccount.address);
+      console.log('🔧 Account type:', eoaAccount.type);
       
-      // ✅ According to MetaMask docs: just pass { walletClient } directly
-      signerConfig = { walletClient };
+      const salt = deploySalt || this.generateDeterministicSalt(eoaAccount.address);
       
-    } else {
-      // Local accounts (private key) - use account directly
-      console.log('🔑 Using local account signer');
-      signerConfig = { account: eoaAccount };
+      let signerConfig;
+      
+      if (eoaAccount.type === 'json-rpc') {
+        if (!walletClient) {
+          throw new Error('walletClient is required for JSON-RPC accounts');
+        }
+        
+        console.log('📝 Using wallet client signer for JSON-RPC account');
+        signerConfig = { walletClient };
+        
+      } else {
+        console.log('🔑 Using local account signer');
+        signerConfig = { account: eoaAccount };
+      }
+      
+      const smartAccountConfig = {
+        client: this.client.publicClient,
+        implementation: Implementation[implementation],
+        deployParams: SMART_ACCOUNT_CONFIG.deployParamsTemplate(eoaAccount.address),
+        deploySalt: salt,
+        signer: signerConfig
+      };
+      
+      console.log('⚙️ Smart account config prepared');
+      
+      const smartAccount = await toMetaMaskSmartAccount(smartAccountConfig);
+      
+      console.log('✅ MetaMask smart account created:', smartAccount.address);
+      
+      const enhancedAccount = {
+        address: smartAccount.address,
+        implementation,
+        owner: eoaAccount.address,
+        deploySalt: salt,
+        account: smartAccount,
+        ownerAccount: eoaAccount,
+        deploymentState: DEPLOYMENT_STATE.NOT_DEPLOYED,
+        deploymentTxHash: null,
+        supportsPasskeys: implementation === ACCOUNT_TYPES.HYBRID || implementation === ACCOUNT_TYPES.PASSKEY,
+        supportsEOA: implementation === ACCOUNT_TYPES.HYBRID || implementation === ACCOUNT_TYPES.EOA,
+        createdAt: Date.now(),
+        lastUsed: null,
+      };
+      
+      this.accountCache.set(smartAccount.address.toLowerCase(), enhancedAccount);
+      await this.checkDeploymentStatus(enhancedAccount);
+      this.storeAccountForEOA(eoaAccount.address, enhancedAccount);
+      
+      console.log('💾 Account cached and stored');
+      
+      return enhancedAccount;
+      
+    } catch (error) {
+      console.error('❌ Smart account creation failed:', error);
+      throw new Error(`Smart account creation failed: ${error.message}`);
     }
-    
-    // Create smart account configuration
-    const smartAccountConfig = {
-      client: this.client.publicClient,
-      implementation: Implementation[implementation],
-      deployParams: SMART_ACCOUNT_CONFIG.deployParamsTemplate(eoaAccount.address),
-      deploySalt: salt,
-      signer: signerConfig // ✅ Now correctly formatted
-    };
-    
-    console.log('⚙️ Smart account config prepared');
-    console.log('⚙️ Signer type:', eoaAccount.type === 'json-rpc' ? 'walletClient' : 'account');
-    
-    // Create MetaMask Smart Account
-    const smartAccount = await toMetaMaskSmartAccount(smartAccountConfig);
-    
-    console.log('✅ MetaMask smart account created:', smartAccount.address);
-    
-    // Enhanced account object
-    const enhancedAccount = {
-      // Core account data
-      address: smartAccount.address,
-      implementation,
-      owner: eoaAccount.address,
-      deploySalt: salt,
-      
-      // Account instance
-      account: smartAccount,
-      ownerAccount: eoaAccount,
-      
-      // Deployment state
-      deploymentState: DEPLOYMENT_STATE.NOT_DEPLOYED,
-      deploymentTxHash: null,
-      
-      // Configuration
-      supportsPasskeys: implementation === ACCOUNT_TYPES.HYBRID || implementation === ACCOUNT_TYPES.PASSKEY,
-      supportsEOA: implementation === ACCOUNT_TYPES.HYBRID || implementation === ACCOUNT_TYPES.EOA,
-      
-      // Metadata
-      createdAt: Date.now(),
-      lastUsed: null,
-    };
-    
-    // Cache the account
-    this.accountCache.set(smartAccount.address.toLowerCase(), enhancedAccount);
-    
-    // Check deployment status
-    await this.checkDeploymentStatus(enhancedAccount);
-    
-    // Store in localStorage linked to EOA
-    this.storeAccountForEOA(eoaAccount.address, enhancedAccount);
-    
-    console.log('💾 Account cached and stored');
-    
-    return enhancedAccount;
-    
-  } catch (error) {
-    console.error('❌ Smart account creation failed:', error);
-    throw new Error(`Smart account creation failed: ${error.message}`);
   }
-}
+
   /**
-   * Deploy smart account on-chain
-   * @param {object} smartAccount - Smart account object
-   * @param {object} firstTransaction - Optional first transaction
-   * @returns {Promise<string>} Deployment transaction hash
+   * ✅ FIXED: Deploy using Fastlane with proper sponsor signature
    */
+  async deploySmartAccount(smartAccount, firstTransaction = null) {
+    if (!smartAccount || !smartAccount.account) {
+      throw new Error('Valid smart account is required');
+    }
 
-  /**
- * Deploy smart account on-chain
- * Uses Pimlico bundler (UserOperation) instead of sendTransaction.
- */
-async deploySmartAccount(smartAccount, firstTransaction = null) {
-  if (!smartAccount || !smartAccount.account) {
-    throw new Error('Valid smart account is required');
-  }
+    const accountAddress = smartAccount.address.toLowerCase();
 
-  const accountAddress = smartAccount.address.toLowerCase();
+    if (smartAccount.deploymentState === DEPLOYMENT_STATE.DEPLOYED) {
+      throw new Error('Account already deployed');
+    }
 
-  // Prevent duplicate deployments
-  if (smartAccount.deploymentState === DEPLOYMENT_STATE.DEPLOYED) {
-    throw new Error('Account already deployed');
-  }
+    try {
+      console.log('🚀 [Deploy] Starting deployment via Fastlane bundler for:', smartAccount.address);
 
-  try {
-    console.log('🚀 [Deploy] Starting deployment via Pimlico bundler for:', smartAccount.address);
+      smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYING;
+      this.pendingDeployments.set(accountAddress, Date.now());
 
-    smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYING;
-    this.pendingDeployments.set(accountAddress, Date.now());
+      // ✅ Import Fastlane bundler
+      const { bundlerClient } = await import('../smartAccount/bundlerClient.js');
 
-    // ✅ Dynamically import Pimlico bundler
-    const { bundlerClient } = await import('../smartAccount/bundlerClient.js');
+      // Prepare minimal deployment call
+      const call = firstTransaction || {
+        to: smartAccount.address,
+        data: '0x',
+        value: 0n
+      };
 
-    // Prepare minimal deployment call
-    const call = firstTransaction || {
-      to: smartAccount.address,
-      data: '0x',
-      value: 0n
-    };
+      console.log('🔧 Step 1: Preparing user operation...');
 
-    // ✅ Create smart account client with Pimlico integration
-    const smartAccountClient = bundlerClient.createSmartAccountClient(smartAccount.account, {
-      sponsorUserOperation: true
-    });
+      // ✅ STEP 1: Create basic smart account client WITHOUT paymaster first
+      const basicClient = await bundlerClient.createSmartAccountClient(smartAccount.account, {
+        sponsorUserOperation: false // Don't enable paymaster yet
+      });
 
-    console.log('📦 Sending deployment UserOperation...');
+      // ✅ STEP 2: Prepare the user operation (gets gas estimates)
+      const preparedUserOp = await basicClient.prepareUserOperation({
+        account: smartAccount.account,
+        calls: [call]
+      });
 
-    // ✅ Send deployment as a UserOperation (replaces sendTransaction)
-    const userOpHash = await smartAccountClient.sendUserOperation({
-      calls: [call]
-    });
+      console.log('✅ User operation prepared:', {
+        sender: preparedUserOp.sender,
+        nonce: preparedUserOp.nonce?.toString(),
+        callGasLimit: preparedUserOp.callGasLimit?.toString(),
+        verificationGasLimit: preparedUserOp.verificationGasLimit?.toString(),
+        preVerificationGas: preparedUserOp.preVerificationGas?.toString()
+      });
 
-    console.log('🧾 Waiting for UserOperation receipt...');
-    const receipt = await bundlerClient.waitForUserOperationReceipt(userOpHash);
+      // ✅ STEP 3: Get paymaster address
+      const paymasterAddress = await bundlerClient.getPaymasterAddress();
+      
+      if (!paymasterAddress) {
+        throw new Error('Failed to get paymaster address');
+      }
 
-    if (!receipt?.success) {
+      console.log('💰 Paymaster address:', paymasterAddress);
+
+      // ✅ STEP 4: Convert to packed format for signing
+      const packedUserOp = toPackedUserOperation(preparedUserOp);
+
+      console.log('📦 Packed user operation for signing');
+
+      // ✅ STEP 5: Prepare paymaster context with sponsor signature
+      const paymasterContext = await preparePaymasterContext(
+        packedUserOp,
+        paymasterAddress,
+        BigInt(MONAD_CONFIG.chainId)
+      );
+
+      console.log('✅ Paymaster context prepared with sponsor signature');
+
+      // ✅ STEP 6: Send the user operation with sponsor context
+      console.log('📤 Sending user operation to Fastlane bundler...');
+
+      const userOpHash = await bundlerClient.bundlerClient.sendUserOperation({
+        account: smartAccount.account,
+        calls: [call],
+        // ✅ CRITICAL: Include gas values from preparation
+        nonce: preparedUserOp.nonce,
+        callGasLimit: preparedUserOp.callGasLimit,
+        verificationGasLimit: preparedUserOp.verificationGasLimit,
+        preVerificationGas: preparedUserOp.preVerificationGas,
+        maxFeePerGas: preparedUserOp.maxFeePerGas,
+        maxPriorityFeePerGas: preparedUserOp.maxPriorityFeePerGas,
+        // ✅ CRITICAL: Include paymaster context
+        paymasterContext
+      });
+
+      console.log('✅ User operation submitted:', userOpHash);
+
+      // ✅ STEP 7: Wait for user operation receipt
+      console.log('⏳ Waiting for user operation receipt...');
+
+      const receipt = await bundlerClient.bundlerClient.waitForUserOperationReceipt({
+        hash: userOpHash
+      });
+
+      console.log('📄 Receipt received:', receipt);
+
+      if (!receipt.success) {
+        smartAccount.deploymentState = DEPLOYMENT_STATE.FAILED;
+        throw new Error('User operation execution failed');
+      }
+
+      // ✅ Extract transaction hash from receipt
+      const txHash = receipt.receipt?.transactionHash || userOpHash;
+
+      // ✅ Update deployment metadata
+      smartAccount.deploymentTxHash = txHash;
+      smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYED;
+
+      // ✅ Cache + store for persistence
+      this.deployedAccounts.set(accountAddress, smartAccount);
+      this.storeAccountForEOA(smartAccount.owner, smartAccount);
+      this.pendingDeployments.delete(accountAddress);
+
+      console.log(`✅ Smart account deployed via Fastlane: ${smartAccount.address}`);
+      console.log(`✅ Transaction hash: ${txHash}`);
+      
+      return txHash;
+      
+    } catch (error) {
+      console.error('❌ Smart account deployment failed:', error);
+      console.error('Error details:', {
+        message: error.message,
+        cause: error.cause,
+        stack: error.stack?.split('\n').slice(0, 3)
+      });
+      
       smartAccount.deploymentState = DEPLOYMENT_STATE.FAILED;
-      throw new Error('Deployment UserOperation failed');
+      this.pendingDeployments.delete(accountAddress);
+      throw new Error(`Smart account deployment failed: ${error.message}`);
     }
-
-    // ✅ Update deployment metadata
-    smartAccount.deploymentTxHash = receipt.receipt?.transactionHash || null;
-    smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYED;
-
-    // ✅ Cache + store for persistence
-    this.deployedAccounts.set(accountAddress, smartAccount);
-    this.storeAccountForEOA(smartAccount.owner, smartAccount);
-    this.pendingDeployments.delete(accountAddress);
-
-    console.log(`✅ Smart account deployed via Pimlico: ${smartAccount.address}`);
-    return smartAccount.deploymentTxHash;
-  } catch (error) {
-    console.error('❌ Smart account deployment failed:', error);
-    smartAccount.deploymentState = DEPLOYMENT_STATE.FAILED;
-    this.pendingDeployments.delete(accountAddress);
-    throw new Error(`Smart account deployment failed: ${error.message}`);
   }
-}
 
-  
-  /**
-   * Check if smart account is deployed on-chain
-   */
   async checkDeploymentStatus(smartAccount) {
     if (!smartAccount || !smartAccount.address) {
       return false;
@@ -261,12 +286,7 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       return false;
     }
   }
-  
-  /**
-   * Load all smart accounts for a specific EOA
-   * @param {string} eoaAddress - EOA address
-   * @returns {object[]} Array of smart accounts
-   */
+
   loadAccountsForEOA(eoaAddress) {
     if (!eoaAddress) return [];
     
@@ -289,10 +309,7 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       return [];
     }
   }
-  
-  /**
-   * Store smart account linked to EOA in localStorage
-   */
+
   storeAccountForEOA(eoaAddress, smartAccount) {
     if (!eoaAddress || !smartAccount) return;
     
@@ -300,7 +317,6 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       const storageKey = `smart_accounts_${eoaAddress.toLowerCase()}`;
       const existing = this.loadAccountsForEOA(eoaAddress);
       
-      // Check if account already exists
       const index = existing.findIndex(
         acc => acc.address.toLowerCase() === smartAccount.address.toLowerCase()
       );
@@ -324,10 +340,7 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       console.error('Failed to store account for EOA:', error);
     }
   }
-  
-  /**
-   * Remove smart account from EOA's list
-   */
+
   removeAccountFromEOA(eoaAddress, smartAccountAddress) {
     if (!eoaAddress || !smartAccountAddress) return false;
     
@@ -341,7 +354,6 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       
       localStorage.setItem(storageKey, JSON.stringify(filtered));
       
-      // Also remove from cache
       this.accountCache.delete(smartAccountAddress.toLowerCase());
       this.deployedAccounts.delete(smartAccountAddress.toLowerCase());
       
@@ -352,19 +364,13 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       return false;
     }
   }
-  
-  /**
-   * Get smart account by address
-   */
+
   getSmartAccount(address) {
     if (!address) return null;
     const key = address.toLowerCase();
     return this.accountCache.get(key) || this.deployedAccounts.get(key) || null;
   }
-  
-  /**
-   * Generate deterministic salt for account deployment
-   */
+
   generateDeterministicSalt(ownerAddress, entropy = '') {
     const data = encodePacked(
       ['address', 'string'],
@@ -372,19 +378,14 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
     );
     return keccak256(data);
   }
-  
-  /**
-   * Get optimal gas parameters for deployment
-   */
+
   async getOptimalGasParams() {
     try {
       const gasEstimate = await gasEstimator.estimateOperationGas('ACCOUNT_DEPLOYMENT');
       
       return {
         gas: BigInt(gasEstimate.standard.gasLimit),
-        // ✅ Monad uses fixed gasPrice (legacy mode)
         gasPrice: BigInt(gasEstimate.standard.gasPrice || MONAD_CONFIG.baseFee),
-       
       };
       
     } catch (error) {
@@ -392,14 +393,10 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
       return {
         gas: BigInt(GAS_LIMITS.accountDeployment),
         gasPrice: MONAD_CONFIG.baseFee,
-      
       };
     }
   }
-  
-  /**
-   * Wait for pending deployment to complete
-   */
+
   async waitForDeployment(accountAddress, timeout = 60000) {
     const startTime = Date.now();
     const pollInterval = 2000;
@@ -440,28 +437,23 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
     });
   }
 
-  /**
- * Check if account is deployed at address (cached for 5 minutes)
- */
   async checkAccountDeployment(address) {
     if (!address) return false;
-    // ✅ Initialize cache if not exists
 
     if (!this.deploymentCache) this.deploymentCache = new Map();
     if (!this.deploymentLocks) this.deploymentLocks = new Set();
-    // Check cache first
+
     const cached = this.deploymentCache.get(address);
     if (cached && Date.now() - cached.timestamp < 300000) {
       return cached.data;
     }
-    // Prevent duplicate concurrent calls
 
     if (this.deploymentLocks.has(address)) return cached?.data || false;
     this.deploymentLocks.add(address);
+
     try {
       const code = await this.client.publicClient.getBytecode({ address });
       const deployed = code && code !== "0x";
-      // ✅ Store in cache with timestamp
 
       this.deploymentCache.set(address, { data: deployed, timestamp: Date.now() });
       return deployed;
@@ -473,16 +465,10 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
     }
   }
 
-  /**
-   * List all cached accounts
-   */
   listAccounts() {
     return Array.from(this.accountCache.values());
   }
-  
-  /**
-   * Clean up expired accounts and pending deployments
-   */
+
   cleanup() {
     const now = Date.now();
     const maxAge = 86400000; // 24 hours
@@ -511,27 +497,17 @@ export const smartAccountFactory = new SmartAccountFactory();
 
 // ===== UTILITY FUNCTIONS =====
 
-/**
- * Create a new smart account with EOA
- */
 export const createNewSmartAccount = async (eoaAccount, walletClient, options = {}) => {
-  // ✅ FIXED: Pass walletClient as second parameter
   return await smartAccountFactory.createSmartAccount(eoaAccount, walletClient, {
     implementation: ACCOUNT_TYPES.HYBRID,
     ...options
   });
 };
 
-/**
- * Check if address is a deployed smart account
- */
 export const isSmartAccount = async (address) => {
   return await smartAccountFactory.checkAccountDeployment(address);
 };
 
-/**
- * Load smart accounts for EOA
- */
 export const loadSmartAccountsForEOA = (eoaAddress) => {
   return smartAccountFactory.loadAccountsForEOA(eoaAddress);
 };
