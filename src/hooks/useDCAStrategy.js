@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { calculateNextExecution, cancelDCAStrategy } from '../services/dca/dcaEngine';
 import { formatUnits, parseUnits } from 'viem';
 import toast from 'react-hot-toast';
 
@@ -18,20 +17,17 @@ import {
   EXECUTION_STATUS
 } from '../services/dca/dcaEngine';
 
-import { getPrice, getTWAP, subscribeToPrice } from '../services/dca/priceOracle';
 import { estimateSwapGas } from '../services/dca/swapExecutor';
 
 // Utils
 import { 
   validateDCAStrategy,
   validateDCASchedule,
-  validateTokenAmount,
-  validateSlippage
+  validateTokenAmount
 } from '../utils/validators';
 
 import {
   formatTokenAmount,
-  formatPrice,
   formatDCAFrequency,
   formatDCAStatus,
   formatDateTime,
@@ -41,16 +37,14 @@ import {
 
 import {
   DCA_CONFIG,
-  SUPPORTED_TOKENS,
-  ERROR_CODES,
-  MONAD_CONFIG
+  SWAP_INTERVALS,
+  ERROR_CODES
 } from '../utils/constants';
 
 /**
  * useDCAStrategy Hook
  * 
- * Manages DCA strategy lifecycle: creation, execution, monitoring, performance tracking.
- * Integrates with smart accounts, delegations, oracles, and swap execution.
+ * Manages DCA strategy lifecycle (NO ORACLE/PRICE FEEDS)
  * 
  * @param {Object} smartAccount - Smart account from useSmartAccount
  * @returns {Object} Strategy management interface
@@ -60,7 +54,6 @@ export const useDCAStrategy = (smartAccount) => {
   const [strategies, setStrategies] = useState([]);
   const [activeStrategy, setActiveStrategy] = useState(null);
   const [executions, setExecutions] = useState([]);
-  const [prices, setPrices] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState({
@@ -74,15 +67,13 @@ export const useDCAStrategy = (smartAccount) => {
   });
 
   // ===== REFS =====
-  const priceSubscriptions = useRef(new Map());
   const refreshInterval = useRef(null);
   const isMounted = useRef(true);
 
   // ===== COMPUTED STATE =====
   const hasStrategies = strategies.length > 0;
-  const hasActiveStrategies = strategies.some(s => s.status === STRATEGY_STATUS.ACTIVE);
+  const hasActiveStrategies = strategies.some(s => s.state?.status === STRATEGY_STATUS.ACTIVE);
   const canCreateStrategy = smartAccount?.isDeployed && !isLoading;
-
 
   // ===== STRATEGY LOADING =====
   const loadStrategies = useCallback(async () => {
@@ -92,18 +83,16 @@ export const useDCAStrategy = (smartAccount) => {
       setIsLoading(true);
       setError(null);
 
-      const allStrategies = await getAllStrategies(smartAccount.accountAddress);
+      const result = await getAllStrategies({
+        smartAccount: smartAccount.accountAddress
+      }, {
+        includePerformance: true
+      });
       
       if (isMounted.current) {
+        const allStrategies = result?.strategies || [];
         setStrategies(allStrategies);
         updateStats(allStrategies);
-        
-        // Subscribe to price feeds for active strategies
-        allStrategies
-          .filter(s => s.status === STRATEGY_STATUS.ACTIVE)
-          .forEach(strategy => {
-            subscribeToPriceFeed(strategy.fromToken, strategy.toToken);
-          });
       }
     } catch (err) {
       console.error('[useDCAStrategy] Load strategies error:', err);
@@ -135,12 +124,9 @@ export const useDCAStrategy = (smartAccount) => {
       }
 
       // Validate schedule
-      const scheduleValidation = validateDCASchedule(
-        config.frequency,
-        config.startTime || Date.now()
-      );
-      if (!scheduleValidation.isValid) {
-        throw new Error(`Invalid schedule: ${scheduleValidation.errors.join(', ')}`);
+      const intervalConfig = SWAP_INTERVALS[config.interval?.toUpperCase()];
+      if (!intervalConfig) {
+        throw new Error('Invalid swap interval');
       }
 
       // Get token info
@@ -152,11 +138,13 @@ export const useDCAStrategy = (smartAccount) => {
       }
 
       // Create strategy through DCA engine
-      const strategy = await createStrategy(
+      const result = await createStrategy(
         {
           ...config,
           smartAccount: smartAccount.accountAddress,
-          owner: smartAccount.accountAddress
+          owner: smartAccount.accountAddress,
+          tokenInDecimals: fromToken.decimals,
+          tokenOutDecimals: toToken.decimals
         },
         {
           autoStart: config.autoStart !== false,
@@ -165,21 +153,19 @@ export const useDCAStrategy = (smartAccount) => {
         }
       );
 
-      if (isMounted.current) {
+      if (isMounted.current && result.success) {
+        const newStrategy = result.strategy;
         setStrategies(prev => {
-          const newList = [...prev, strategy];
+          const newList = [...prev, newStrategy];
           updateStats(newList);
           return newList;
         });
-        setActiveStrategy(strategy);
-        
-        // Subscribe to price feed
-        subscribeToPriceFeed(strategy.fromToken, strategy.toToken);
+        setActiveStrategy(newStrategy);
 
         toast.success(`Strategy created: ${fromToken.symbol} → ${toToken.symbol}`);
       }
 
-      return strategy;
+      return result.strategy;
 
     } catch (err) {
       console.error('[useDCAStrategy] Create strategy error:', err);
@@ -201,18 +187,19 @@ export const useDCAStrategy = (smartAccount) => {
       setIsLoading(true);
       setError(null);
 
-      const updatedStrategy = await startStrategy(strategyId);
+      const result = await startStrategy(strategyId);
 
-      if (isMounted.current) {
+      if (isMounted.current && result.success) {
+        // Reload strategy to get updated state
+        const updatedStrategy = await getStrategy(strategyId);
         setStrategies(prev => 
           prev.map(s => s.id === strategyId ? updatedStrategy : s)
         );
 
-        subscribeToPriceFeed(updatedStrategy.fromToken, updatedStrategy.toToken);
         toast.success('Strategy started');
       }
 
-      return updatedStrategy;
+      return result;
 
     } catch (err) {
       console.error('[useDCAStrategy] Start strategy error:', err);
@@ -233,9 +220,10 @@ export const useDCAStrategy = (smartAccount) => {
       setIsLoading(true);
       setError(null);
 
-      const updatedStrategy = await pauseStrategy(strategyId, reason);
+      const result = await pauseStrategy(strategyId, reason);
 
-      if (isMounted.current) {
+      if (isMounted.current && result.success) {
+        const updatedStrategy = await getStrategy(strategyId);
         setStrategies(prev => 
           prev.map(s => s.id === strategyId ? updatedStrategy : s)
         );
@@ -243,7 +231,7 @@ export const useDCAStrategy = (smartAccount) => {
         toast.success('Strategy paused');
       }
 
-      return updatedStrategy;
+      return result;
 
     } catch (err) {
       console.error('[useDCAStrategy] Pause strategy error:', err);
@@ -264,18 +252,18 @@ export const useDCAStrategy = (smartAccount) => {
       setIsLoading(true);
       setError(null);
 
-      const updatedStrategy = await resumeStrategy(strategyId);
+      const result = await resumeStrategy(strategyId);
 
-      if (isMounted.current) {
+      if (isMounted.current && result.success) {
+        const updatedStrategy = await getStrategy(strategyId);
         setStrategies(prev => 
           prev.map(s => s.id === strategyId ? updatedStrategy : s)
         );
 
-        subscribeToPriceFeed(updatedStrategy.fromToken, updatedStrategy.toToken);
         toast.success('Strategy resumed');
       }
 
-      return updatedStrategy;
+      return result;
 
     } catch (err) {
       console.error('[useDCAStrategy] Resume strategy error:', err);
@@ -296,22 +284,18 @@ export const useDCAStrategy = (smartAccount) => {
       setIsLoading(true);
       setError(null);
 
-      const updatedStrategy = await cancelStrategy(strategyId, reason);
+      const result = await cancelStrategy(strategyId, reason);
 
-      if (isMounted.current) {
+      if (isMounted.current && result.success) {
+        const updatedStrategy = await getStrategy(strategyId);
         setStrategies(prev => 
           prev.map(s => s.id === strategyId ? updatedStrategy : s)
         );
 
-        // Unsubscribe from price feed
-        if (updatedStrategy.fromToken && updatedStrategy.toToken) {
-          unsubscribeFromPriceFeed(updatedStrategy.fromToken, updatedStrategy.toToken);
-        }
-
         toast.success('Strategy cancelled');
       }
 
-      return updatedStrategy;
+      return result;
 
     } catch (err) {
       console.error('[useDCAStrategy] Cancel strategy error:', err);
@@ -325,7 +309,7 @@ export const useDCAStrategy = (smartAccount) => {
         setIsLoading(false);
       }
     }
-  }, [strategies]);
+  }, []);
 
   // ===== MANUAL EXECUTION =====
   const executeStrategySwap = useCallback(async (strategyId) => {
@@ -335,7 +319,7 @@ export const useDCAStrategy = (smartAccount) => {
 
       const result = await executeSwap(strategyId);
 
-      if (isMounted.current) {
+      if (isMounted.current && result.success) {
         // Reload strategy to get updated state
         const updatedStrategy = await getStrategy(strategyId);
         setStrategies(prev => 
@@ -365,105 +349,6 @@ export const useDCAStrategy = (smartAccount) => {
     }
   }, []);
 
-  // ===== PRICE SUBSCRIPTIONS =====
-  const subscribeToPriceFeed = useCallback(async (fromToken, toToken) => {
-    const pairKey = `${fromToken}-${toToken}`;
-    
-    if (priceSubscriptions.current.has(pairKey)) {
-      return; // Already subscribed
-    }
-
-    try {
-      const subscription = await subscribeToPrice(
-        fromToken,
-        toToken,
-        (priceData) => {
-          if (isMounted.current) {
-            setPrices(prev => ({
-              ...prev,
-              [pairKey]: priceData
-            }));
-          }
-        }
-      );
-
-      priceSubscriptions.current.set(pairKey, subscription);
-
-      // Also get initial price
-      const initialPrice = await getPrice(fromToken, toToken);
-      if (isMounted.current) {
-        setPrices(prev => ({
-          ...prev,
-          [pairKey]: initialPrice
-        }));
-      }
-
-    } catch (err) {
-      console.error('[useDCAStrategy] Price subscription error:', err);
-    }
-  }, []);
-
-  // ===== INITIALIZATION =====
-  useEffect(() => {
-    isMounted.current = true;
-    
-    if (smartAccount?.accountAddress) {
-      loadStrategies();
-      startRefreshInterval();
-    }
-
-    return () => {
-      isMounted.current = false;
-      stopRefreshInterval();
-      cleanupPriceSubscriptions();
-    };
-  }, [smartAccount?.accountAddress, subscribeToPriceFeed]);
-
-  const unsubscribeFromPriceFeed = useCallback((fromToken, toToken) => {
-    const pairKey = `${fromToken}-${toToken}`;
-    const subscription = priceSubscriptions.current.get(pairKey);
-
-    if (subscription) {
-      subscription.unsubscribe();
-      priceSubscriptions.current.delete(pairKey);
-    }
-
-    setPrices(prev => {
-      const updated = { ...prev };
-      delete updated[pairKey];
-      return updated;
-    });
-  }, []);
-
-  const cleanupPriceSubscriptions = useCallback(() => {
-    priceSubscriptions.current.forEach(subscription => {
-      subscription.unsubscribe();
-    });
-    priceSubscriptions.current.clear();
-    setPrices({});
-  }, []);
-
-  // ===== PRICE QUERIES =====
-  const getCurrentPrice = useCallback(async (fromToken, toToken) => {
-    try {
-      const priceData = await getPrice(fromToken, toToken);
-      return priceData;
-    } catch (err) {
-      console.error('[useDCAStrategy] Get price error:', err);
-      throw err;
-    }
-  }, []);
-
-  const getTWAPPrice = useCallback(async (fromToken, toToken, period = 900) => {
-    try {
-      const twapData = await getTWAP(fromToken, toToken, { period });
-      return twapData;
-    } catch (err) {
-      console.error('[useDCAStrategy] Get TWAP error:', err);
-      throw err;
-    }
-  }, []);
-
   // ===== PERFORMANCE TRACKING =====
   const getStrategyPerformanceData = useCallback(async (strategyId) => {
     try {
@@ -484,10 +369,14 @@ export const useDCAStrategy = (smartAccount) => {
       }
 
       const gasEstimate = await estimateSwapGas({
-        tokenIn: strategy.fromToken,
-        tokenOut: strategy.toToken,
-        amountIn: strategy.amountPerExecution,
-        slippage: strategy.slippage
+        tokenIn: strategy.config.tokenIn,
+        tokenOut: strategy.config.tokenOut,
+        amountIn: parseUnits(
+          strategy.config.swapAmount.toString(), 
+          strategy.config.tokenInDecimals || 18
+        ),
+        tokenInDecimals: strategy.config.tokenInDecimals || 18,
+        tokenOutDecimals: strategy.config.tokenOutDecimals || 18
       });
 
       return gasEstimate;
@@ -500,39 +389,40 @@ export const useDCAStrategy = (smartAccount) => {
 
   // ===== DISPLAY HELPERS =====
   const formatStrategyForDisplay = useCallback((strategy) => {
-    const fromToken = getTokenInfo(strategy.fromToken);
-    const toToken = getTokenInfo(strategy.toToken);
-    const pairKey = `${strategy.fromToken}-${strategy.toToken}`;
-    const currentPrice = prices[pairKey];
+    const fromToken = getTokenInfo(strategy.config?.tokenIn);
+    const toToken = getTokenInfo(strategy.config?.tokenOut);
+    const intervalConfig = SWAP_INTERVALS[strategy.config?.interval?.toUpperCase()];
 
-    const statusInfo = formatDCAStatus(strategy.status, strategy.nextExecutionAt);
+    const statusInfo = formatDCAStatus(
+      strategy.state?.status, 
+      strategy.state?.nextExecutionAt
+    );
     
     return {
       ...strategy,
       fromTokenInfo: fromToken,
       toTokenInfo: toToken,
       formattedAmount: formatTokenAmount(
-        strategy.amountPerExecution,
+        strategy.config?.swapAmount || 0,
         fromToken?.decimals || 18,
         4
       ),
-      formattedFrequency: formatDCAFrequency(strategy.interval),
-      formattedNextExecution: strategy.nextExecutionAt 
-        ? formatDateTime(strategy.nextExecutionAt)
+      formattedFrequency: intervalConfig?.label || 'Unknown',
+      formattedNextExecution: strategy.state?.nextExecutionAt 
+        ? formatDateTime(strategy.state.nextExecutionAt)
         : 'Not scheduled',
-      timeUntilNext: strategy.nextExecutionAt
-        ? formatDuration((strategy.nextExecutionAt - Date.now()) / 1000)
+      timeUntilNext: strategy.state?.nextExecutionAt
+        ? formatDuration((strategy.state.nextExecutionAt - Date.now()) / 1000)
         : null,
-      currentPrice: currentPrice ? formatPrice(currentPrice.price) : 'Loading...',
       statusInfo,
-      progressPercent: strategy.maxExecutions
-        ? (strategy.executionCount / strategy.maxExecutions) * 100
+      progressPercent: strategy.config?.maxExecutions
+        ? ((strategy.state?.totalExecutions || 0) / strategy.config.maxExecutions) * 100
         : 0,
-      remainingExecutions: strategy.maxExecutions 
-        ? strategy.maxExecutions - strategy.executionCount
+      remainingExecutions: strategy.config?.maxExecutions 
+        ? strategy.config.maxExecutions - (strategy.state?.totalExecutions || 0)
         : 'Unlimited'
     };
-  }, [prices]);
+  }, []);
 
   // ===== QUERY METHODS =====
   const getStrategyById = useCallback((strategyId) => {
@@ -540,12 +430,12 @@ export const useDCAStrategy = (smartAccount) => {
   }, [strategies]);
 
   const getStrategiesByStatus = useCallback((status) => {
-    return strategies.filter(s => s.status === status);
+    return strategies.filter(s => s.state?.status === status);
   }, [strategies]);
 
   const getStrategiesByToken = useCallback((tokenAddress) => {
     return strategies.filter(
-      s => s.fromToken === tokenAddress || s.toToken === tokenAddress
+      s => s.config?.tokenIn === tokenAddress || s.config?.tokenOut === tokenAddress
     );
   }, [strategies]);
 
@@ -562,13 +452,13 @@ export const useDCAStrategy = (smartAccount) => {
     };
 
     strategyList.forEach(strategy => {
-      if (strategy.status === STRATEGY_STATUS.ACTIVE) stats.active++;
-      if (strategy.status === STRATEGY_STATUS.PAUSED) stats.paused++;
-      if (strategy.status === STRATEGY_STATUS.COMPLETED) stats.completed++;
+      if (strategy.state?.status === STRATEGY_STATUS.ACTIVE) stats.active++;
+      if (strategy.state?.status === STRATEGY_STATUS.PAUSED) stats.paused++;
+      if (strategy.state?.status === STRATEGY_STATUS.COMPLETED) stats.completed++;
 
-      stats.totalInvested += Number(strategy.totalInvested || 0);
-      stats.totalReceived += Number(strategy.totalReceived || 0);
-      stats.totalGasSpent += Number(strategy.totalGasSpent || 0);
+      stats.totalInvested += Number(strategy.state?.totalInvested || 0);
+      stats.totalReceived += Number(strategy.state?.totalReceived || 0);
+      stats.totalGasSpent += Number(strategy.metadata?.gasSpent || 0);
     });
 
     setStats(stats);
@@ -592,13 +482,22 @@ export const useDCAStrategy = (smartAccount) => {
     }
   }, []);
 
-  // ===== NEXT EXECUTION CALCULATION =====
-  const getNextExecutionTime = useCallback((strategyId) => {
-    const strategy = strategies.find(s => s.id === strategyId);
-    if (!strategy) return null;
+  // ===== INITIALIZATION =====
+  useEffect(() => {
+    isMounted.current = true;
+    
+    if (smartAccount?.accountAddress) {
+      loadStrategies();
+      startRefreshInterval();
+    }
 
-    return calculateNextExecution(strategy);
-  }, [strategies]);
+    return () => {
+      isMounted.current = false;
+      stopRefreshInterval();
+    };
+  }, [smartAccount?.accountAddress, loadStrategies, startRefreshInterval, stopRefreshInterval]);
+
+  
 
   // ===== EXPORTS =====
   return {
@@ -606,7 +505,6 @@ export const useDCAStrategy = (smartAccount) => {
     strategies,
     activeStrategy,
     executions,
-    prices,
     isLoading,
     error,
     stats,
@@ -628,10 +526,6 @@ export const useDCAStrategy = (smartAccount) => {
     // Execution
     executeStrategySwap,
 
-    // Price queries
-    getCurrentPrice,
-    getTWAPPrice,
-
     // Performance
     getStrategyPerformanceData,
 
@@ -642,7 +536,6 @@ export const useDCAStrategy = (smartAccount) => {
     getStrategyById,
     getStrategiesByStatus,
     getStrategiesByToken,
-    getNextExecutionTime,
 
     // Reload
     loadStrategies,
@@ -653,13 +546,12 @@ export const useDCAStrategy = (smartAccount) => {
     // Constants
     STRATEGY_STATUS,
     EXECUTION_STATUS,
-    DCA_FREQUENCIES: Object.keys(DCA_CONFIG.schedules)
+    SWAP_INTERVALS: Object.keys(SWAP_INTERVALS)
   };
 };
 
 // ===== EXPORTS =====
 export default useDCAStrategy;
-
 
 // Export constants for convenience
 export { STRATEGY_STATUS, EXECUTION_STATUS } from '../services/dca/dcaEngine';

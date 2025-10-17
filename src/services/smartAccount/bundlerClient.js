@@ -1,27 +1,25 @@
 import { createSmartAccountClient } from 'permissionless';
-import { entryPoint06Address, entryPoint07Address } from 'viem/account-abstraction';
-import { createPimlicoClient } from 'permissionless/clients/pimlico';
-import { createPublicClient, http, parseAbi, getAddress, maxUint256 } from 'viem';
-import { 
-  MONAD_CONFIG, 
-  CONTRACTS, 
-  GAS_LIMITS, 
-  ERROR_CODES 
+import {
+  entryPoint06Address,
+  entryPoint07Address,
+  createBundlerClient,
+  createPaymasterClient
+} from 'viem/account-abstraction';
+import { createPublicClient, http } from 'viem';
+import {
+  MONAD_CONFIG,
+  GAS_LIMITS,
+  ERROR_CODES,
+  FASTLANE_CONFIG
 } from '../../utils/constants.js';
 import { monadTestnet } from '../monad/monadClient.js';
 import { gasEstimator } from '../monad/gasEstimator.js';
 
-// ===== PIMLICO CONFIGURATION FOR MONAD =====
+// Fastlane endpoints (default)
+const FASTLANE_BUNDLER_URL = FASTLANE_CONFIG?.BUNDLER_URL || 'https://monad-testnet.4337-shbundler-fra.fastlane-labs.xyz';
+const FASTLANE_WS_URL = 'wss://monad-testnet.4337-shbundler-fra.fastlane-labs.xyz';
 
-const getPimlicoUrl = (apiKey) => {
-  
-  const monadChainId = monadTestnet.id || 'monad-testnet'; 
-  return `https://api.pimlico.io/v2/10143/rpc?apikey=${apiKey}`;
-};
-
-/**
- * User Operation status states
- */
+// User Operation status states
 export const USER_OP_STATUS = {
   PENDING: 'pending',
   SUBMITTED: 'submitted',
@@ -31,387 +29,573 @@ export const USER_OP_STATUS = {
   REJECTED: 'rejected'
 };
 
-/**
- * EntryPoint versions supported
- */
+// EntryPoint versions supported
 export const ENTRYPOINT_VERSIONS = {
   V06: 'v0.6',
   V07: 'v0.7'
 };
 
-// ===== PIMLICO BUNDLER CLIENT CLASS =====
-
-/**
- * Pimlico-powered bundler client for Monad testnet
- */
-export class MonadPimlicoBundlerClient {
+export class MonadFastlaneBundlerClient {
+  
   constructor(options = {}) {
     const {
-      apiKey = import.meta.env.VITE_PIMLICO_API_KEY,
       entryPointVersion = ENTRYPOINT_VERSIONS.V07,
       timeout = 30000,
       pollingInterval = 1000
     } = options;
-    
-    if (!apiKey) {
-      throw new Error('Pimlico API key is required');
-    }
-    
-    this.apiKey = apiKey;
+
     this.entryPointVersion = entryPointVersion;
     this.timeout = timeout;
     this.pollingInterval = pollingInterval;
-    
-    // Set up URLs
-    this.pimlicoUrl = getPimlicoUrl(apiKey);
-    
-    // Initialize clients
+
+    this.bundlerUrl = FASTLANE_BUNDLER_URL;
+    this.wsUrl = FASTLANE_WS_URL;
+
     this.publicClient = null;
-    this.pimlicoClient = null;
+    this.bundlerClient = null;
+    this.paymasterClient = null;
     this.entryPoint = this.getEntryPointConfig(entryPointVersion);
-    
-    // Operation tracking
+
     this.pendingOperations = new Map();
     this.operationHistory = new Map();
-    
-    // Initialize clients
+
     this.initializeClients();
   }
-  
-  /**
-   * Initialize Pimlico and public clients
-   */
+
   initializeClients() {
     try {
-      // Create public client for blockchain queries
       this.publicClient = createPublicClient({
         chain: monadTestnet,
-        transport: http(monadTestnet.rpcUrls.default.http[0]) // Use default RPC for public queries
+        transport: http(monadTestnet.rpcUrls.default.http[0])
       });
-      
-      // Create Pimlico client (handles both bundler and paymaster)
-      this.pimlicoClient = createPimlicoClient({
-        transport: http(this.pimlicoUrl, {
-          timeout: this.timeout
-        }),
-        entryPoint: this.entryPoint
+  
+      this.entryPointAddress = this.getEntryPointConfig(this.entryPointVersion);
+  
+      this.paymasterClient = createPaymasterClient({
+        transport: http(this.bundlerUrl)
       });
-      
-      console.log(`Pimlico client initialized for Monad with EntryPoint ${this.entryPointVersion}`);
-      
+  
+      // ✅ FIX: Proper bundler RPC helper with correct parameter format
+      this._bundlerRpc = async (method, params) => {
+        try {
+          // ✅ CRITICAL: For eth_estimateUserOperationGas, ensure EntryPoint is included
+          let finalParams = params;
+          
+          if (method === 'eth_estimateUserOperationGas' && Array.isArray(params) && params.length === 1) {
+            // Add entryPoint as second parameter if missing
+            finalParams = [params[0], this.entryPointAddress];
+            console.log('📡 Adding entryPoint to estimateUserOperationGas params');
+          }
+  
+          console.log(`📡 Bundler RPC: ${method}`, {
+            paramsCount: finalParams.length,
+            hasEntryPoint: finalParams.length > 1
+          });
+  
+          const res = await fetch(this.bundlerUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: Date.now(),
+              method,
+              params: finalParams
+            })
+          });
+  
+          const json = await res.json();
+          
+          if (json.error) {
+            console.error('❌ Bundler RPC error response:', json.error);
+            throw new Error(json.error.message || JSON.stringify(json.error));
+          }
+          
+          return json.result;
+        } catch (err) {
+          console.error('❌ Bundler RPC error:', method, err);
+          throw err;
+        }
+      };
+  
+      this.bundlerClient = createBundlerClient({
+        transport: http(this.bundlerUrl),
+        name: 'shBundler',
+        client: this.publicClient,
+        chain: monadTestnet,
+        entryPoint: this.entryPointAddress,
+        paymaster: this.paymasterClient,
+        userOperation: {
+          estimateFeesPerGas: async () => {
+            return await this.getUserOperationGasPrice();
+          }
+        }
+      });
+  
+      // ✅ FIX: Remove the problematic estimateUserOperationGas override
+      // Let viem handle it with proper EntryPoint parameter
+      console.log('✅ Using viem default estimateUserOperationGas (with EntryPoint parameter)');
+  
+      console.log(`✅ Fastlane shBundler initialized for Monad with EntryPoint ${this.entryPointVersion} at ${this.entryPointAddress}`);
+      console.log(`✅ Fastlane shMonad Paymaster integrated at ${this.bundlerUrl}`);
     } catch (error) {
-      console.error('Failed to initialize Pimlico clients:', error);
-      throw new Error(`Pimlico client initialization failed: ${error.message}`);
+      console.error('❌ Failed to initialize Fastlane clients:', error);
+      throw new Error(`Fastlane client initialization failed: ${error.message}`);
     }
   }
-  
-  /**
-   * Get EntryPoint configuration for version
-   * @param {string} version - EntryPoint version
-   * @returns {object} EntryPoint configuration
-   */
+
+  async healthCheck() {
+    try {
+      console.log('🔍 Fastlane Config Check:', {
+        bundlerUrl: this.bundlerUrl,
+        entryPoint: this.entryPointAddress,
+        version: this.entryPointVersion,
+        hasPaymaster: !!this.paymasterClient
+      });
+
+      await this.getUserOperationGasPrice();
+
+      const code = await this.publicClient.getCode({
+        address: this.entryPointAddress
+      });
+
+      if (!code || code === '0x') {
+        console.error('❌ EntryPoint not deployed at', this.entryPointAddress);
+        return false;
+      }
+
+      console.log('✅ EntryPoint verified at', this.entryPointAddress);
+      console.log('✅ Fastlane shBundler + shMonad healthy');
+
+      return true;
+    } catch (error) {
+      console.error('❌ Health check failed:', error);
+      return false;
+    }
+  }
+
   getEntryPointConfig(version) {
     switch (version) {
       case ENTRYPOINT_VERSIONS.V07:
-        return {
-          address: entryPoint07Address,
-          version: "0.7"
-        };
+        return entryPoint07Address;
       case ENTRYPOINT_VERSIONS.V06:
-        return {
-          address: entryPoint06Address,
-          version: "0.6"
-        };
+        return entryPoint06Address;
       default:
-        return {
-          address: entryPoint07Address,
-          version: "0.7"
-        };
+        return entryPoint07Address;
     }
   }
-  
+
+  async getPaymasterAddress() {
+    if (this.cachedPaymasterAddress) {
+      return this.cachedPaymasterAddress;
+    }
+
+    try {
+      const ADDRESS_HUB = FASTLANE_CONFIG?.ADDRESS_HUB || '0xC9f0cDE8316AbC5Efc8C3f5A6b571e815C021B51';
+
+      const paymasterAddress = await this.publicClient.readContract({
+        address: ADDRESS_HUB,
+        abi: [{
+          inputs: [],
+          name: 'paymaster4337',
+          outputs: [{ name: '', type: 'address' }],
+          stateMutability: 'view',
+          type: 'function'
+        }],
+        functionName: 'paymaster4337'
+      });
+
+      this.cachedPaymasterAddress = paymasterAddress;
+      console.log('✅ Fastlane Paymaster Address:', paymasterAddress);
+
+      return paymasterAddress;
+    } catch (error) {
+      console.error('❌ Failed to get paymaster address:', error);
+      return null;
+    }
+  }
   /**
-   * Create smart account client with Pimlico integration
-   * @param {object} account - Smart account instance
-   * @param {object} options - Additional options
-   * @returns {object} Smart account client
+   * Create smart account client with Fastlane shBundler + shMonad Paymaster
+   * Accepts optional paymasterExtras which can include sponsorSignature, validUntil, validAfter.
    */
-  createSmartAccountClient(account, options = {}) {
-    const { sponsorUserOperation = true } = options;
-    
+  async createSmartAccountClient(account, options = {}) {
+    const {
+      sponsorUserOperation = false,
+      sponsorAddress = null,
+      // NEW: allow passing sponsorSignature & time bounds at client creation time
+      paymasterExtras = {}
+    } = options;
+
+    const {
+      sponsorSignature: extraSponsorSignature,
+      validUntil: extraValidUntil,
+      validAfter: extraValidAfter
+    } = paymasterExtras || {};
+
+    console.log('🔧 createSmartAccountClient called with:', {
+      hasAccount: !!account,
+      accountAddress: account?.address,
+      sponsorUserOperation,
+      sponsorAddress,
+      sponsorAddressType: typeof sponsorAddress,
+      hasPaymasterExtras: !!paymasterExtras
+    });
+
     const clientConfig = {
       account,
       chain: monadTestnet,
-      bundlerTransport: http(this.pimlicoUrl),
+      bundlerTransport: http(this.bundlerUrl),
       userOperation: {
         estimateFeesPerGas: async () => {
-          return (await this.pimlicoClient.getUserOperationGasPrice()).fast;
-        },
-      },
+          const gasPrice = await this.getUserOperationGasPrice();
+          return gasPrice.fast || gasPrice.standard || gasPrice;
+        }
+      }
     };
-    
-    // Add paymaster support if requested
-    if (sponsorUserOperation) {
-      clientConfig.paymaster = this.pimlicoClient;
+
+    if (sponsorUserOperation && this.paymasterClient) {
+      console.log('💰 Gas sponsorship enabled via Fastlane shMonad paymaster');
+
+      clientConfig.paymaster = this.paymasterClient;
+
+      if (sponsorAddress) {
+        const normalized = this._normalizeAddress(sponsorAddress);
+        if (!this._isValidAddress(normalized)) {
+          console.warn('⚠️ Provided sponsorAddress is invalid format, falling back to provided raw value:', sponsorAddress);
+        }
+
+        console.log(`👔 SPONSOR MODE: ${normalized} will pay gas for ${account.address}`);
+
+        // Build full paymasterContext including optional signature and bounds
+        const sponsorContext = {
+          mode: 'sponsor',
+          sponsor: normalized
+        };
+
+        if (extraSponsorSignature) sponsorContext.sponsorSignature = extraSponsorSignature;
+        if (extraValidUntil) sponsorContext.validUntil = extraValidUntil;
+        if (extraValidAfter) sponsorContext.validAfter = extraValidAfter;
+
+        clientConfig.paymasterContext = sponsorContext;
+
+        console.log('✅ Paymaster context configured (sponsor mode):', clientConfig.paymasterContext);
+      } else {
+        console.log(`👤 USER MODE: ${account.address} will pay with its bonded shMON`);
+        clientConfig.paymasterContext = {
+          mode: 'user',
+          address: account.address
+        };
+      }
     }
-    
-    return createSmartAccountClient(clientConfig);
+
+ 
+    console.log('📋 Final client config:', {
+      hasAccount: !!clientConfig.account,
+      hasPaymaster: !!clientConfig.paymaster,
+      hasPaymasterContext: !!clientConfig.paymasterContext,
+      paymasterMode: clientConfig.paymasterContext?.mode,
+      paymasterAddress: clientConfig.paymasterContext?.address || clientConfig.paymasterContext?.sponsor
+    });
+
+    const rawSmartClient = createSmartAccountClient(clientConfig);
+    const smartClient = rawSmartClient || {};
+
+    if (!smartClient.account) {
+      smartClient.account = account;
+    }
+
+    if (!smartClient.sendTransaction) {
+      if (typeof smartClient.sendUserOperation === 'function') {
+        smartClient.sendTransaction = async (tx) => {
+          return await smartClient.sendUserOperation(tx);
+        };
+      } else if (typeof smartClient.send === 'function') {
+        smartClient.sendTransaction = async (tx) => smartClient.send(tx);
+      } else {
+        smartClient.sendTransaction = async () => {
+          throw new Error('Smart client does not implement sendTransaction/sendUserOperation');
+        };
+      }
+    }
+
+    return smartClient;
   }
-  
-  /**
-   * Estimate gas for user operation using Pimlico
-   * @param {object} userOperation - User operation parameters
-   * @param {object} options - Additional options
-   * @returns {Promise<object>} Gas estimates
-   */
+
+  _normalizeAddress(addr) {
+    if (!addr) return addr;
+    if (typeof addr !== 'string') return addr;
+    const lowered = addr.toLowerCase();
+    if (lowered.startsWith('0x')) return lowered;
+    return `0x${lowered}`;
+  }
+
+  _isValidAddress(addr) {
+    if (!addr || typeof addr !== 'string') return false;
+    return /^0x[a-fA-F0-9]{40}$/.test(addr);
+  }
+
   async estimateUserOperationGas(userOperation, options = {}) {
-    if (!userOperation) {
-      throw new Error('User operation is required');
+    let account = options.account || userOperation.account;
+    let sender = userOperation.sender;
+    let nonce = userOperation.nonce;
+    let callData = userOperation.callData;
+  
+    if (!sender && userOperation.address) {
+      account = userOperation;
+      sender = account.address;
     }
-    
+  
+    if (!account) {
+      console.error('❌ No account provided to estimateUserOperationGas');
+      throw new Error('Account is required for gas estimation');
+    }
+  
+    if (!sender) {
+      sender = account.address;
+    }
+  
+    if (!callData) {
+      console.warn('⚠️ No callData provided, attempting to encode from account');
+      if (options.calls && account.encodeCalls) {
+        callData = await account.encodeCalls(options.calls);
+      }
+    }
+  
+    if (nonce === undefined || nonce === null) {
+      console.warn('⚠️ No nonce provided, fetching from account');
+      if (account.getNonce) {
+        nonce = await account.getNonce();
+      }
+    }
+  
+    let gasPrice;
     try {
-      // Validate user operation structure
-      this.validateUserOperation(userOperation);
-      
-      // Use Pimlico to estimate gas
-      const gasEstimate = await this.pimlicoClient.estimateUserOperationGas({
-        userOperation,
-        entryPoint: this.entryPoint.address
-      });
-      
-      // Apply Monad-specific adjustments
-      const monadAdjustedGas = this.adjustGasForMonad(gasEstimate);
-      
-      return {
-        ...monadAdjustedGas,
-        original: gasEstimate,
-        monadSpecific: {
-          chargesGasLimit: true,
-          baseFee: MONAD_CONFIG.baseFee.toString(),
-          adjustmentApplied: true
+      gasPrice = await this.getUserOperationGasPrice();
+    } catch (error) {
+      console.warn('⚠️ Failed to get gas price from Fastlane, falling back:', error.message);
+      gasPrice = {
+        fast: {
+          maxFeePerGas: MONAD_CONFIG.baseFee * 3n,
+          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 5n
         }
       };
-      
-    } catch (error) {
-      // Fallback to local gas estimation
-      console.warn('Pimlico gas estimation failed, using fallback:', error.message);
-      return await this.fallbackGasEstimation(userOperation);
     }
-  }
   
-  /**
-   * Submit user operation via Pimlico bundler
-   * @param {object} userOperation - Complete user operation
-   * @param {object} options - Submission options
-   * @returns {Promise<string>} User operation hash
-   */
-  async sendUserOperation(userOperation, options = {}) {
-    if (!userOperation) {
-      throw new Error('User operation is required');
-    }
-    
+    console.log('🔍 Estimating gas with Fastlane:', {
+      hasAccount: !!account,
+      sender,
+      hasCallData: !!callData,
+      callDataLength: callData?.length,
+      nonce: nonce?.toString(),
+      accountType: account?.type,
+      maxFeePerGas: (gasPrice.fast?.maxFeePerGas || gasPrice.maxFeePerGas)?.toString?.() || null,
+      maxPriorityFeePerGas: (gasPrice.fast?.maxPriorityFeePerGas || gasPrice.maxPriorityFeePerGas)?.toString?.() || null
+    });
+  
+    // ✅ FIX: Return proper gas limits (NOT zero)
+    console.log('⚠️ Using safe gas defaults for Monad testnet (non-zero values)');
+  
+    return {
+      callGasLimit: 250000n,
+      verificationGasLimit: 120000n,
+      preVerificationGas: 60000n,
+      paymasterVerificationGasLimit: this.paymasterClient ? 60000n : undefined,
+      paymasterPostOpGasLimit: this.paymasterClient ? 40000n : undefined,
+      monadSpecific: {
+        chargesGasLimit: true,
+        baseFee: MONAD_CONFIG.baseFee.toString(),
+        adjustmentApplied: true,
+        note: 'Using safe fallback for Monad testnet with Fastlane'
+      }
+    };
+  }
+  // ===== REPLACE YOUR sendUserOperation METHOD WITH THIS =====
+
+  async sendUserOperation(userOperationOrConfig, options = {}) {
     try {
-      // Validate user operation
-      this.validateUserOperation(userOperation);
-      
-      // Submit via Pimlico bundler
-      const userOpHash = await this.pimlicoClient.sendUserOperation({
-        userOperation,
-        entryPoint: this.entryPoint.address
+      // ✅ Support both direct userOperation and config object
+      let userOperation;
+      let paymasterContext;
+      let account;
+      let entryPoint = this.entryPointAddress;
+  
+      if (userOperationOrConfig.userOperation) {
+        // Called with config object { userOperation, account, entryPoint, paymasterContext }
+        userOperation = userOperationOrConfig.userOperation;
+        paymasterContext = userOperationOrConfig.userOperation.paymasterContext;
+        account = userOperationOrConfig.account;
+        entryPoint = userOperationOrConfig.entryPoint || this.entryPointAddress;
+      } else {
+        // Called with direct userOperation
+        userOperation = userOperationOrConfig;
+        paymasterContext = userOperation.paymasterContext;
+        account = options.account;
+      }
+  
+      console.log('🔍 sendUserOperation called with:', {
+        hasUserOp: !!userOperation,
+        hasPaymasterContext: !!paymasterContext,
+        paymasterMode: paymasterContext?.mode,
+        hasSponsor: !!paymasterContext?.sponsor,
+        hasSignature: !!paymasterContext?.sponsorSignature,
+        entryPoint,
+        // ✅ CRITICAL: Log gas values to verify they're NOT zero
+        callGasLimit: userOperation.callGasLimit?.toString(),
+        verificationGasLimit: userOperation.verificationGasLimit?.toString(),
+        preVerificationGas: userOperation.preVerificationGas?.toString()
       });
-      
-      // Track the operation
+  
+      // Log full UserOperation object for debugging
+      console.log('🔍 Full UserOperation payload:', JSON.stringify(userOperation, null, 2));
+  
+      // ✅ CRITICAL: Validate gas fields are NOT zero before sending
+      if (!userOperation.callGasLimit || userOperation.callGasLimit === 0n ||
+          !userOperation.verificationGasLimit || userOperation.verificationGasLimit === 0n ||
+          !userOperation.preVerificationGas || userOperation.preVerificationGas === 0n) {
+        
+        console.error('❌ UserOperation has zero gas limits!', {
+          callGasLimit: userOperation.callGasLimit?.toString(),
+          verificationGasLimit: userOperation.verificationGasLimit?.toString(),
+          preVerificationGas: userOperation.preVerificationGas?.toString()
+        });
+        
+        throw new Error('UserOperation gas limits cannot be zero. Estimation failed.');
+      }
+  
+      // If paymasterContext exists with signature, log and pass it
+      if (paymasterContext && paymasterContext.sponsorSignature) {
+        console.log('✅ Fastlane paymaster context detected with signature');
+        console.log('   Mode:', paymasterContext.mode);
+        console.log('   Sponsor:', paymasterContext.sponsor);
+        console.log('   Valid until:', paymasterContext.validUntil?.toString());
+        console.log('   Valid after:', paymasterContext.validAfter?.toString());
+  
+        // Before sending, log the literal bundler JSON-RPC request payload
+        const rpcPayload = {
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'eth_sendUserOperation',
+          params: [{
+            ...userOperation,
+            account: account || userOperation.account,
+            paymasterContext: {
+              mode: paymasterContext.mode,
+              sponsor: paymasterContext.sponsor,
+              sponsorSignature: paymasterContext.sponsorSignature,
+              validUntil: paymasterContext.validUntil,
+              validAfter: paymasterContext.validAfter
+            }
+          }]
+        };
+        console.log('📡 JSON-RPC Request Payload:', JSON.stringify(rpcPayload, null, 2));
+  
+        const userOpHash = await this.bundlerClient.sendUserOperation(rpcPayload.params[0]);
+  
+        this.trackUserOperation(userOpHash, userOperation);
+        console.log(`✅ User operation submitted via Fastlane with sponsorship: ${userOpHash}`);
+        
+        return userOpHash;
+      }
+  
+      // Fallback: Send without paymaster context, log payload as well
+      this.validateUserOperation(userOperation);
+  
+      const fallbackPayload = {
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'eth_sendUserOperation',
+        params: [{
+          ...userOperation,
+          account: account || userOperation.account,
+          entryPoint
+        }]
+      };
+      console.log('📡 JSON-RPC Request Payload (Fallback):', JSON.stringify(fallbackPayload, null, 2));
+  
+      const userOpHash = await this.bundlerClient.sendUserOperation(fallbackPayload.params[0]);
+  
       this.trackUserOperation(userOpHash, userOperation);
+      console.log(`✅ User operation submitted: ${userOpHash}`);
       
-      console.log(`User operation submitted via Pimlico: ${userOpHash}`);
       return userOpHash;
-      
+  
     } catch (error) {
+      console.error('❌ Fastlane user operation submission failed:', error);
+      console.error('   Error details:', {
+        message: error.message,
+        shortMessage: error.shortMessage,
+        details: error.details,
+        cause: error.cause
+      });
       throw new Error(`User operation submission failed: ${error.message}`);
     }
   }
   
-  /**
-   * Wait for user operation receipt via Pimlico
-   * @param {string} userOpHash - User operation hash
-   * @param {number} timeout - Timeout in milliseconds
-   * @returns {Promise<object>} User operation receipt
-   */
-  async waitForUserOperationReceipt(userOpHash, timeout = this.timeout) {
-    if (!userOpHash) {
-      throw new Error('User operation hash is required');
-    }
-    
-    try {
-      // Use Pimlico's receipt polling
-      const receipt = await this.pimlicoClient.waitForUserOperationReceipt({
-        hash: userOpHash,
-        timeout,
-        pollingInterval: this.pollingInterval
-      });
-      
-      // Update operation tracking
-      this.updateOperationStatus(userOpHash, USER_OP_STATUS.EXECUTED, receipt);
-      
-      // Enhance receipt with Monad-specific information
-      const enhancedReceipt = {
-        ...receipt,
-        network: 'monad-testnet',
-        blockTime: MONAD_CONFIG.blockTime,
-        gasChargedAsLimit: true,
-        monadSpecific: {
-          baseFee: MONAD_CONFIG.baseFee.toString(),
-          chargesGasLimit: true,
-          fastFinality: receipt.blockNumber ? 'speculative' : 'full'
-        }
-      };
-      
-      return enhancedReceipt;
-      
-    } catch (error) {
-      // Update operation status on failure
-      this.updateOperationStatus(userOpHash, USER_OP_STATUS.FAILED, { error: error.message });
-      
-      if (error.message.includes('timeout')) {
-        throw new Error(`${ERROR_CODES.TIMEOUT_ERROR}: User operation confirmation timeout`);
-      }
-      
-      throw new Error(`Failed to get user operation receipt: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get user operation status via Pimlico
-   * @param {string} userOpHash - User operation hash
-   * @returns {Promise<object>} Operation status
-   */
-  async getUserOperationStatus(userOpHash) {
-    if (!userOpHash) {
-      throw new Error('User operation hash is required');
-    }
-    
-    try {
-      // Check local tracking first
-      const localStatus = this.pendingOperations.get(userOpHash);
-      
-      // Try to get receipt from Pimlico
-      let receipt = null;
-      try {
-        receipt = await this.pimlicoClient.getUserOperationReceipt({ 
-          hash: userOpHash 
-        });
-      } catch (error) {
-        // Receipt not available yet
-      }
-      
-      if (receipt) {
-        const status = receipt.success ? USER_OP_STATUS.EXECUTED : USER_OP_STATUS.FAILED;
-        this.updateOperationStatus(userOpHash, status, receipt);
-        
-        return {
-          hash: userOpHash,
-          status,
-          receipt,
-          submittedAt: localStatus?.submittedAt,
-          executedAt: Date.now()
-        };
-      }
-      
-      // Return pending status
-      return {
-        hash: userOpHash,
-        status: localStatus?.status || USER_OP_STATUS.PENDING,
-        submittedAt: localStatus?.submittedAt,
-        userOperation: localStatus?.userOperation
-      };
-      
-    } catch (error) {
-      throw new Error(`Failed to get user operation status: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get gas price from Pimlico
-   * @returns {Promise<object>} Gas price data
-   */
+
   async getUserOperationGasPrice() {
     try {
-      return await this.pimlicoClient.getUserOperationGasPrice();
+      const gasPrice = typeof this.bundlerClient.getUserOperationGasPrice === 'function'
+        ? await this.bundlerClient.getUserOperationGasPrice()
+        : null;
+
+      if (gasPrice && (gasPrice.fast || gasPrice.standard || gasPrice.slow)) {
+        return gasPrice;
+      }
+
+      if (gasPrice) {
+        return {
+          slow: gasPrice,
+          standard: gasPrice,
+          fast: gasPrice
+        };
+      }
+
+      throw new Error('Bundler did not return gas price');
     } catch (error) {
-      // Fallback to Monad defaults
+      console.warn('⚠️ Fastlane gas price fetch failed, using fallback:', error.message);
+
       return {
         slow: {
-          maxFeePerGas: MONAD_CONFIG.baseFee * 15n / 10n, // 1.5x
-          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 20n // 5%
+          maxFeePerGas: MONAD_CONFIG.baseFee * 15n / 10n,
+          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 20n
         },
         standard: {
-          maxFeePerGas: MONAD_CONFIG.baseFee * 2n, // 2x
-          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 10n // 10%
+          maxFeePerGas: MONAD_CONFIG.baseFee * 2n,
+          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 10n
         },
         fast: {
-          maxFeePerGas: MONAD_CONFIG.baseFee * 3n, // 3x
-          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 5n // 20%
+          maxFeePerGas: MONAD_CONFIG.baseFee * 3n,
+          maxPriorityFeePerGas: MONAD_CONFIG.baseFee / 5n
         }
       };
     }
   }
-  
-  /**
-   * Get Pimlico paymaster data for ERC-20 payments
-   * @param {string} token - Token address for payment
-   * @returns {Promise<object|null>} Paymaster data or null
-   */
-  async getTokenQuotes(tokens) {
-    try {
-      return await this.pimlicoClient.getTokenQuotes({ tokens });
-    } catch (error) {
-      console.warn('Token quotes request failed:', error.message);
-      return null;
-    }
-  }
-  
-  /**
-   * Validate user operation structure
-   * @param {object} userOperation - User operation to validate
-   * @throws {Error} If validation fails
-   */
+
   validateUserOperation(userOperation) {
-    const requiredFields = [
-      'sender',
-      'nonce',
-      'callData'
-    ];
-    
+    const requiredFields = ['sender', 'nonce', 'callData'];
+
     for (const field of requiredFields) {
       if (!userOperation[field]) {
         throw new Error(`Missing required field: ${field}`);
       }
     }
-    
-    // Validate addresses
+
     if (userOperation.sender && !userOperation.sender.match(/^0x[a-fA-F0-9]{40}$/)) {
       throw new Error('Invalid sender address format');
     }
-    
-    if (userOperation.paymasterAndData && !userOperation.paymasterAndData.startsWith("0x")) {
+
+    if (userOperation.paymasterAndData && !userOperation.paymasterAndData.startsWith('0x')) {
       throw new Error('Invalid paymaster address format');
     }
   }
-  
-  /**
-   * Adjust gas estimates for Monad network specifics
-   * @param {object} gasEstimate - Original gas estimate
-   * @returns {object} Monad-adjusted gas estimate
-   */
+
   adjustGasForMonad(gasEstimate) {
-    // Apply buffer for Monad's gas_limit charging
     const buffer = GAS_LIMITS.bufferMultiplier || 1.2;
-    
+
     const adjustGas = (value) => {
       if (!value) return undefined;
       return BigInt(Math.floor(Number(value) * buffer));
     };
-    
+
     return {
       callGasLimit: adjustGas(gasEstimate.callGasLimit),
       verificationGasLimit: adjustGas(gasEstimate.verificationGasLimit),
@@ -420,28 +604,17 @@ export class MonadPimlicoBundlerClient {
       paymasterPostOpGasLimit: adjustGas(gasEstimate.paymasterPostOpGasLimit)
     };
   }
-  
-  /**
-   * Fallback gas estimation
-   * @param {object} userOperation - User operation
-   * @returns {Promise<object>} Gas estimate
-   */
+
   async fallbackGasEstimation(userOperation) {
-    // Use static values as ultimate fallback
     return {
-      callGasLimit: BigInt(GAS_LIMITS.userOperation || 200000),
-      verificationGasLimit: BigInt(100000),
-      preVerificationGas: BigInt(21000),
-      paymasterVerificationGasLimit: userOperation.paymaster ? BigInt(50000) : undefined,
-      paymasterPostOpGasLimit: userOperation.paymaster ? BigInt(30000) : undefined
+      callGasLimit: BigInt(GAS_LIMITS.userOperation || 250000),
+      verificationGasLimit: BigInt(120000),
+      preVerificationGas: BigInt(60000),
+      paymasterVerificationGasLimit: userOperation.paymaster ? BigInt(60000) : undefined,
+      paymasterPostOpGasLimit: userOperation.paymaster ? BigInt(40000) : undefined
     };
   }
-  
-  /**
-   * Track user operation
-   * @param {string} userOpHash - User operation hash
-   * @param {object} userOperation - User operation data
-   */
+
   trackUserOperation(userOpHash, userOperation) {
     this.pendingOperations.set(userOpHash, {
       hash: userOpHash,
@@ -449,146 +622,121 @@ export class MonadPimlicoBundlerClient {
       status: USER_OP_STATUS.SUBMITTED,
       submittedAt: Date.now()
     });
-    
-    // Auto-cleanup after 1 hour
+
     setTimeout(() => {
       this.pendingOperations.delete(userOpHash);
     }, 3600000);
   }
-  
-  /**
-   * Update operation status
-   * @param {string} userOpHash - User operation hash
-   * @param {string} status - New status
-   * @param {object} data - Additional data
-   */
+
   updateOperationStatus(userOpHash, status, data = {}) {
     const operation = this.pendingOperations.get(userOpHash);
     if (operation) {
       operation.status = status;
       operation.lastUpdated = Date.now();
-      
+
       if (data.error) operation.error = data.error;
       if (data.blockNumber) operation.blockNumber = data.blockNumber;
       if (data.transactionHash) operation.transactionHash = data.transactionHash;
-      
-      // Move to history if completed
+
       if (status === USER_OP_STATUS.EXECUTED || status === USER_OP_STATUS.FAILED) {
         this.operationHistory.set(userOpHash, operation);
         this.pendingOperations.delete(userOpHash);
       }
     }
   }
-  
-  /**
-   * Get all pending operations
-   * @returns {object[]} Array of pending operations
-   */
+
   getPendingOperations() {
     return Array.from(this.pendingOperations.values());
   }
-  
-  /**
-   * Get operation history
-   * @param {number} limit - Maximum number of operations to return
-   * @returns {object[]} Array of completed operations
-   */
+
   getOperationHistory(limit = 100) {
     const operations = Array.from(this.operationHistory.values());
     return operations
       .sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0))
       .slice(0, limit);
   }
-  
-  /**
-   * Health check for Pimlico service
-   * @returns {Promise<boolean>} True if healthy
-   */
-  async healthCheck() {
-    try {
-      await this.getUserOperationGasPrice();
-      return true;
-    } catch (error) {
-      console.warn('Pimlico health check failed:', error.message);
-      return false;
-    }
-  }
 }
 
-// ===== SINGLETON INSTANCE =====
+// Singleton instance
+export const bundlerClient = new MonadFastlaneBundlerClient();
 
 /**
- * Default Pimlico bundler client instance
- */
-export const bundlerClient = new MonadPimlicoBundlerClient();
-
-// ===== UTILITY FUNCTIONS =====
-
-/**
- * Create sponsored user operation (gasless)
- * @param {object} smartAccount - Smart account instance  
- * @param {object} call - Call parameters
- * @param {object} options - Additional options
- * @returns {object} User operation with paymaster
+ * Create a sponsored user operation.
+ *
+ * Parameters:
+ *  - smartAccount: smart account object
+ *  - call: call or array of calls
+ *  - options:
+ *      sponsorAddress (optional) - sponsor EOA address (string). If omitted, FASTLANE_CONFIG.SPONSOR_EOA will be used.
+ *      sponsorSignature (optional) - signature returned by the sponsor backend for this userOp (hex string)
+ *      validUntil (optional bigint) - unix timestamp (bigint) validUntil
+ *      validAfter (optional bigint) - unix timestamp (bigint) validAfter
+ *      any additional options are forwarded to sendTransaction
  */
 export const createSponsoredUserOperation = async (smartAccount, call, options = {}) => {
-  const smartAccountClient = bundlerClient.createSmartAccountClient(smartAccount, {
-    sponsorUserOperation: true
-  });
-  
-  return await smartAccountClient.sendTransaction({
-    calls: Array.isArray(call) ? call : [call],
-    ...options
-  });
-};
+  const {
+    sponsorAddress: optSponsorAddress = null,
+    sponsorSignature = null,
+    validUntil = null,
+    validAfter = null,
+    ...rest
+  } = options;
 
-/**
- * Create ERC-20 sponsored user operation
- * @param {object} smartAccount - Smart account instance
- * @param {object} call - Call parameters  
- * @param {string} paymentToken - Token address for gas payment
- * @param {object} options - Additional options
- * @returns {object} User operation with ERC-20 paymaster
- */
-export const createERC20SponsoredUserOperation = async (smartAccount, call, paymentToken, options = {}) => {
-  const smartAccountClient = bundlerClient.createSmartAccountClient(smartAccount);
-  
-  // Get token quotes for paymaster
-  const quotes = await bundlerClient.getTokenQuotes([paymentToken]);
-  if (!quotes || quotes.length === 0) {
-    throw new Error(`No paymaster available for token: ${paymentToken}`);
+  // Determine sponsor address precedence: explicit option -> FASTLANE_CONFIG -> undefined
+  const sponsorAddressRaw = optSponsorAddress || FASTLANE_CONFIG?.SPONSOR_EOA || null;
+  const sponsorAddress = sponsorAddressRaw ? sponsorAddressRaw.toLowerCase().startsWith('0x') ? sponsorAddressRaw : `0x${sponsorAddressRaw}` : null;
+  if (sponsorAddress && (!sponsorSignature || !validUntil || !validAfter)) {
+    console.warn('⚠️ Sponsorship requested but sponsorSignature or validity bounds missing. Make sure sponsor backend signed getHash and returned sponsorSignature + validUntil + validAfter.');
+    // Optionally: throw new Error('Missing sponsor signature or validity bounds for sponsor mode');
   }
-  
-  const paymaster = quotes[0].paymaster;
-  
-  // Prepare calls with token approval
-
-  const amountToApprove = quotes[0]?.maxCost || maxUint256;
-  const calls = [
-    {
-      to: getAddress(paymentToken),
-      abi: parseAbi(["function approve(address,uint256)"]),
-      functionName: "approve",
-      args: [paymaster, amountToApprove],
-    },
-    ...(Array.isArray(call) ? call : [call])
-  ];
-  
-  return await smartAccountClient.sendTransaction({
-    calls,
-    paymasterContext: {
-      token: paymentToken,
-    },
-    ...options
+  const smartAccountClient = await bundlerClient.createSmartAccountClient(smartAccount, {
+    sponsorUserOperation: !!sponsorAddress,
+    sponsorAddress,
+    paymasterExtras: {
+      sponsorSignature,
+      validUntil,
+      validAfter
+    }
   });
+
+  // Construct paymasterContext to match Fastlane example exactly.
+  // When sponsoring, Fastlane expects keys like: { mode: "sponsor", sponsor, sponsorSignature, validUntil, validAfter }
+  let paymasterContext = undefined;
+  if (sponsorAddress) {
+    paymasterContext = {
+      mode: 'sponsor',
+      sponsor: sponsorAddress
+    };
+
+    if (sponsorSignature) paymasterContext.sponsorSignature = sponsorSignature;
+    if (validUntil) paymasterContext.validUntil = validUntil;
+    if (validAfter) paymasterContext.validAfter = validAfter;
+
+    console.log('🔧 createSponsoredUserOperation: constructed paymasterContext:', paymasterContext);
+  } else {
+    // user (self) mode
+    paymasterContext = {
+      mode: 'user',
+      address: smartAccount.address
+    };
+    console.log('🔧 createSponsoredUserOperation: self-sponsor (user) paymasterContext:', paymasterContext);
+  }
+
+  // sendTransaction via smartAccountClient — pass paymasterContext in options so client has it when creating userop
+  const txOptions = {
+    calls: Array.isArray(call) ? call : [call],
+    paymasterContext,
+    ...rest
+  };
+
+  // Note: smartAccountClient.sendTransaction should accept the paymasterContext inside txOptions.
+  return await smartAccountClient.sendTransaction(txOptions);
 };
 
-// ===== EXPORTS =====
 export default {
-  MonadPimlicoBundlerClient,
+  MonadFastlaneBundlerClient,
   bundlerClient,
   USER_OP_STATUS,
   ENTRYPOINT_VERSIONS,
-  createSponsoredUserOperation,
-  createERC20SponsoredUserOperation
+  createSponsoredUserOperation
 };

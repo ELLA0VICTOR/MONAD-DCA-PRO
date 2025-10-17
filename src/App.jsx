@@ -1,59 +1,66 @@
 import { useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
+
+// Layout
 import Header from './components/Layout/Header';
 import Footer from './components/Layout/Footer';
+
+// Tabs
 import SmartAccountTab from './components/Tabs/SmartAccountTab';
 import DelegationTab from './components/Tabs/DelegationTab';
 import SwapTab from './components/Tabs/SwapTab';
 import TasksTab from './components/Tabs/TasksTab';
 import DashboardTab from './components/Tabs/DashboardTab';
 import ExecutionHistoryTab from './components/Tabs/ExecutionHistoryTab';
+
+// Modals
 import DepositModal from './components/Modals/DepositModal';
 import WithdrawModal from './components/Modals/WithdrawModal';
 import ConfirmModal from './components/Modals/ConfirmModal';
-import AIRecommendationModal from './components/Modals/AIRecommendationModal';
+import MonoAI from './components/Modals/MonoAI';
+
+// Hooks
 import { useSmartAccount } from './hooks/useSmartAccount';
 import { useWallet } from './hooks/useWallet';
 
 function App() {
   const { isConnected: walletConnected } = useWallet();
   const { activeAccount } = useSmartAccount();
-  
+
   // Tab state
   const [activeTab, setActiveTab] = useState('smart-account');
-  
+
   // Modal states
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+
+  // AI modal (MonoAI replaces AIRecommendationModal)
   const [showAIModal, setShowAIModal] = useState(false);
-  const [aiRecommendation, setAIRecommendation] = useState(null);
+  const [aiContext, setAIContext] = useState(null);
+
+  // Confirm modal config
   const [confirmConfig, setConfirmConfig] = useState(null);
 
-  // Handlers
-  const handleTabChange = (tab) => {
-    setActiveTab(tab);
-  };
+  // === Handlers ===
+  const handleTabChange = (tab) => setActiveTab(tab);
 
-  const handleOpenDeposit = () => {
-    setShowDepositModal(true);
-  };
+  const handleOpenDeposit = () => setShowDepositModal(true);
+  const handleOpenWithdraw = () => setShowWithdrawModal(true);
 
-  const handleOpenWithdraw = () => {
-    setShowWithdrawModal(true);
-  };
-
-  const handleShowAIRecommendation = (recommendation) => {
-    setAIRecommendation(recommendation);
+  // Show conversational AI (MonoAI)
+  const handleOpenMonoAI = (context) => {
+    setAIContext(context || {});
     setShowAIModal(true);
   };
 
+  // Show confirmation modal
   const handleShowConfirm = (config) => {
     setConfirmConfig(config);
     setShowConfirmModal(true);
   };
 
-  // Render active tab
+  // === Render Active Tab ===
   const renderActiveTab = () => {
     switch (activeTab) {
       case 'smart-account':
@@ -68,7 +75,8 @@ function App() {
       case 'swap':
         return (
           <SwapTab
-            onShowAIRecommendation={handleShowAIRecommendation}
+            onShowMonoAI={handleOpenMonoAI}
+            onShowConfirm={handleShowConfirm}
           />
         );
       case 'tasks':
@@ -91,14 +99,12 @@ function App() {
       />
 
       <main style={styles.main}>
-        <AnimatePresence mode="wait">
-          {renderActiveTab()}
-        </AnimatePresence>
+        <AnimatePresence mode="wait">{renderActiveTab()}</AnimatePresence>
       </main>
 
       <Footer />
 
-      {/* Modals */}
+      {/* === Global Modals === */}
       <AnimatePresence>
         {showDepositModal && (
           <DepositModal
@@ -107,6 +113,7 @@ function App() {
             smartAccountAddress={activeAccount?.address}
           />
         )}
+
         {showWithdrawModal && (
           <WithdrawModal
             isOpen={showWithdrawModal}
@@ -114,6 +121,7 @@ function App() {
             smartAccount={activeAccount}
           />
         )}
+
         {showConfirmModal && confirmConfig && (
           <ConfirmModal
             isOpen={showConfirmModal}
@@ -121,11 +129,13 @@ function App() {
             {...confirmConfig}
           />
         )}
-        {showAIModal && aiRecommendation && (
-          <AIRecommendationModal
+
+        {/* === Conversational AI Modal === */}
+        {showAIModal && (
+          <MonoAI
             isOpen={showAIModal}
             onClose={() => setShowAIModal(false)}
-            recommendation={aiRecommendation}
+            context={aiContext}
           />
         )}
       </AnimatePresence>
@@ -133,6 +143,7 @@ function App() {
   );
 }
 
+// === Styles ===
 const styles = {
   app: {
     minHeight: '100vh',

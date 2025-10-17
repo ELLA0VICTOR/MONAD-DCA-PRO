@@ -194,7 +194,7 @@ async deploySmartAccount(smartAccount, firstTransaction = null) {
 
     // ✅ Create smart account client with Pimlico integration
     const smartAccountClient = bundlerClient.createSmartAccountClient(smartAccount.account, {
-      sponsorUserOperation: true // allows Pimlico to sponsor deployment if paymaster enabled
+      sponsorUserOperation: true
     });
 
     console.log('📦 Sending deployment UserOperation...');

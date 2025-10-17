@@ -4,37 +4,33 @@ import { gasEstimator } from '../monad/gasEstimator.js';
 import { delegationService } from '../delegation/delegationService.js';
 import { delegationStorage } from '../delegation/delegationStorage.js';
 import { userOperationsService } from '../smartAccount/userOperations.js';
-import { validateDCAStrategy, validateTokenAmount, validateSlippage } from '../../utils/validators.js';
-import { formatTokenAmount, formatPrice, formatDateTime } from '../../utils/formatters.js';
+import { swapExecutor } from './swapExecutor.js';
+import { validateDCAStrategy, validateTokenAmount } from '../../utils/validators.js';
+import { formatTokenAmount, formatDateTime } from '../../utils/formatters.js';
 import { encryptAndStore, retrieveAndDecrypt } from '../../utils/encryption.js';
 import { 
   DCA_CONFIG, 
   CONTRACTS, 
   SUPPORTED_TOKENS, 
   GAS_LIMITS,
-  MONAD_CONFIG 
+  MONAD_CONFIG,
+  SWAP_INTERVALS
 } from '../../utils/constants.js';
-import { priceOracle } from './priceOracle.js';
-import { evaluateExecution } from '../ai/decisionEngine.js'
-
-
 
 function safeBase64Encode(str) {
   try {
     if (typeof Buffer !== 'undefined') {
-      // Node.js & bundlers
       return Buffer.from(str, 'utf-8').toString('base64');
     } else if (typeof btoa !== 'undefined') {
-      // Browser safe UTF-8 → Base64
       return btoa(String.fromCharCode(...new TextEncoder().encode(str)));
     } else {
       throw new Error('No base64 encoder available');
     }
   } catch (e) {
-    // Fallback: timestamp + random
     return `${Date.now()}${Math.floor(Math.random() * 1e9)}`;
   }
 }
+
 // DCA Strategy States
 const STRATEGY_STATUS = {
   CREATED: 'created',
@@ -55,36 +51,17 @@ const EXECUTION_STATUS = {
   SKIPPED: 'skipped'
 };
 
-// DCA Frequency Types
-const DCA_FREQUENCIES = {
-  HOURLY: 'hourly',
-  DAILY: 'daily',
-  WEEKLY: 'weekly',
-  MONTHLY: 'monthly'
-};
-
-// Position Sizing Methods
-const SIZING_METHODS = {
-  FIXED_AMOUNT: 'fixed_amount',
-  PERCENTAGE_BALANCE: 'percentage_balance',
-  TWAP_BASED: 'twap_based',
-  VOLATILITY_ADJUSTED: 'volatility_adjusted'
-};
-
 /**
  * DCA Engine Service
- * Manages DCA strategy lifecycle and automated execution
+ * Manages DCA strategy lifecycle and automated execution (NO ORACLE/AI)
  */
 class DCAEngineService {
   constructor() {
     this.strategies = new Map();
     this.activeExecutions = new Map();
-    this.scheduledJobs = new Map();
+    this.scheduledIntervals = new Map(); // Store interval IDs
     this.executionHistory = new Map();
-    this.priceCache = new Map();
     this.initialized = false;
-    this.schedulerRunning = false;
-    this.schedulerTimer = null;
   }
 
   /**
@@ -94,14 +71,18 @@ class DCAEngineService {
     if (this.initialized) return;
 
     try {
-      // Load existing strategies from storage
       await this.loadStrategiesFromStorage();
-      
-      // Start execution scheduler
-      await this.startScheduler();
+      await swapExecutor.initialize();
       
       this.initialized = true;
-      console.log('DCAEngineService initialized with', this.strategies.size, 'strategies');
+      console.log('DCAEngineService initialized (No Oracle Mode) with', this.strategies.size, 'strategies');
+      
+      // Restart active strategies
+      for (const [strategyId, strategy] of this.strategies.entries()) {
+        if (strategy.state?.status === STRATEGY_STATUS.ACTIVE) {
+          this.scheduleRecurringExecution(strategyId, strategy);
+        }
+      }
     } catch (error) {
       console.error('Failed to initialize DCAEngineService:', error);
       throw new Error(`DCA engine initialization failed: ${error.message}`);
@@ -116,7 +97,6 @@ class DCAEngineService {
       throw new Error('DCA engine not initialized');
     }
 
-    // Validate strategy configuration
     const validation = validateDCAStrategy(strategyConfig);
     if (!validation.isValid) {
       throw new Error(`Invalid DCA strategy: ${validation.errors.join(', ')}`);
@@ -132,7 +112,6 @@ class DCAEngineService {
       const strategyId = this.generateStrategyId(strategyConfig);
       const timestamp = Date.now();
 
-      // Prepare strategy data
       const strategy = {
         id: strategyId,
         config: {
@@ -158,7 +137,6 @@ class DCAEngineService {
           createdBy: strategyConfig.smartAccount,
           encrypted: encryptStrategy,
           gasSpent: 0n,
-          estimatedApr: 0,
           riskScore: this.calculateRiskScore(strategyConfig)
         }
       };
@@ -172,7 +150,7 @@ class DCAEngineService {
         strategy.delegation = delegationResult.delegation;
       }
 
-      // Encrypt and store strategy
+      // Store strategy
       if (encryptStrategy) {
         await this.encryptAndStoreStrategy(strategy);
       } else {
@@ -207,7 +185,7 @@ class DCAEngineService {
       throw new Error('DCA engine not initialized');
     }
 
-    const { validateBalance = true, estimateGas = true } = options;
+    const { validateBalance = true } = options;
 
     try {
       const strategy = await this.getStrategy(strategyId);
@@ -215,7 +193,6 @@ class DCAEngineService {
         throw new Error('Strategy not found');
       }
 
-      // Check current status
       if (strategy.state.status === STRATEGY_STATUS.ACTIVE) {
         throw new Error('Strategy already active');
       }
@@ -224,7 +201,6 @@ class DCAEngineService {
         throw new Error('Strategy already completed');
       }
 
-      // Validate delegation exists and is active
       if (!strategy.delegation) {
         throw new Error('No delegation found for strategy');
       }
@@ -234,19 +210,10 @@ class DCAEngineService {
         throw new Error('Delegation not active or accessible');
       }
 
-      // Validate sufficient balance
       if (validateBalance) {
         const balanceCheck = await this.validateStrategyBalance(strategy);
         if (!balanceCheck.sufficient) {
           throw new Error(`Insufficient balance: need ${balanceCheck.required}, have ${balanceCheck.available}`);
-        }
-      }
-
-      // Estimate gas costs
-      if (estimateGas) {
-        const gasEstimate = await this.estimateStrategyGasCosts(strategy);
-        if (gasEstimate.totalCostMON > strategy.config.maxGasBudget) {
-          throw new Error(`Gas costs too high: estimated ${gasEstimate.totalCostMON} MON, budget ${strategy.config.maxGasBudget} MON`);
         }
       }
 
@@ -255,13 +222,18 @@ class DCAEngineService {
       strategy.state.updatedAt = Date.now();
       strategy.state.nextExecutionAt = this.calculateNextExecution(strategy.config);
 
-      // Save updated strategy
       await this.saveStrategy(strategy);
 
-      // Schedule first execution
-      this.scheduleExecution(strategyId, strategy.state.nextExecutionAt);
+      // Schedule execution based on interval type
+      const intervalConfig = SWAP_INTERVALS[strategy.config.interval?.toUpperCase()];
+      if (intervalConfig && intervalConfig.recurring) {
+        this.scheduleRecurringExecution(strategyId, strategy);
+      } else {
+        // Immediate execution
+        await this.executeSwap(strategyId);
+      }
 
-      console.log(`DCA strategy ${strategyId} started, next execution at ${formatDateTime(strategy.state.nextExecutionAt)}`);
+      console.log(`DCA strategy ${strategyId} started`);
 
       return {
         success: true,
@@ -274,70 +246,62 @@ class DCAEngineService {
       throw new Error(`Strategy start failed: ${error.message}`);
     }
   }
-   // Add helper method to DCAEngineService class:
-  async buildPriceContext(strategy, execution) {
-    const tokenOut = strategy.config.tokenOut;
-    // Get TWAP (15min default)
-    const twapData = await priceOracle.getTWAP(tokenOut, 'USD', {
-      period: DCA_CONFIG.defaultTwapPeriod, //900s
-      method: 'time_weighted'
-    });
-     // Get price change (1hr)
-    const priceChange = await priceOracle.getPriceChange(tokenOut, 'USD', 3600000);
-     // Check liquidity
-    const liquidityCheck = await swapExecutor.checkLiquidity(
-      strategy.config.tokenIn,
-      strategy.config.tokenOut
-    );
-      // Calculate TWAP divergence
-    const spotNum = Number(formatUnits(execution.priceAtExecution, 18));
-    const twapNum = Number(formatUnits(twapData.twap, 18));
-    const twapDivergence = ((spotNum - twapNum) / twapNum) * 100;
 
-    // 🔥 Fetch real MON/USD price (instead of placeholder in decisionEngine
-    const monUsdResult = await priceOracle.getPrice("MON", "USD");
-    return {
-      spot: execution.priceAtExecution,
-      twap: twapData.twap,
-      twapDivergence,
-      volatility: Math.abs(priceChange.changePercentage),
-      priceAge: Date.now() - Date.now(), // Will be set properly from oracle 
-      dataPoints: twapData.dataPoints,
-      hasLiquidity: liquidityCheck.sufficient,
-      priceImpactEstimate: liquidityCheck.priceImpactFor1USD || 0,
-      monUsdPrice: monUsdResult // attach live MON/USD oracle price
-    };
-  }
-  
   /**
-   * Execute a single DCA swap
+   * Schedule recurring execution using setInterval
+   */
+  scheduleRecurringExecution(strategyId, strategy) {
+    // Clear existing interval if any
+    this.cancelScheduledExecution(strategyId);
+
+    const intervalConfig = SWAP_INTERVALS[strategy.config.interval?.toUpperCase()];
+    if (!intervalConfig || !intervalConfig.recurring) {
+      console.warn(`Invalid or non-recurring interval for strategy ${strategyId}`);
+      return;
+    }
+
+    const intervalMs = intervalConfig.intervalMs;
+    
+    const intervalId = setInterval(async () => {
+      try {
+        const currentStrategy = await this.getStrategy(strategyId);
+        if (!currentStrategy || currentStrategy.state.status !== STRATEGY_STATUS.ACTIVE) {
+          this.cancelScheduledExecution(strategyId);
+          return;
+        }
+
+        console.log(`Executing scheduled swap for strategy ${strategyId}`);
+        await this.executeSwap(strategyId);
+      } catch (error) {
+        console.error(`Scheduled execution failed for strategy ${strategyId}:`, error);
+      }
+    }, intervalMs);
+
+    this.scheduledIntervals.set(strategyId, intervalId);
+    console.log(`Scheduled recurring execution for strategy ${strategyId} every ${intervalMs}ms`);
+  }
+
+  /**
+   * Execute a single DCA swap (NO AI/ORACLE CHECKS)
    */
   async executeSwap(strategyId, options = {}) {
     if (!this.initialized) {
       throw new Error('DCA engine not initialized');
     }
 
-    const {
-      forceExecution = false,
-      skipSlippageCheck = false,
-      customAmount = null
-    } = options;
-
+    const { forceExecution = false, customAmount = null } = options;
     const executionId = `exec_${strategyId}_${Date.now()}`;
     
     try {
-      // Get strategy
       const strategy = await this.getStrategy(strategyId);
       if (!strategy) {
         throw new Error('Strategy not found');
       }
 
-      // Check if strategy is active
       if (strategy.state.status !== STRATEGY_STATUS.ACTIVE && !forceExecution) {
         throw new Error(`Strategy not active: ${strategy.state.status}`);
       }
 
-      // Create execution record
       const execution = {
         id: executionId,
         strategyId,
@@ -350,7 +314,6 @@ class DCAEngineService {
         gasUsed: 0n,
         gasCost: 0n,
         slippage: 0,
-        priceAtExecution: 0n,
         error: null,
         txHash: null,
         retryCount: 0
@@ -360,67 +323,7 @@ class DCAEngineService {
 
       console.log(`Starting DCA execution ${executionId} for strategy ${strategyId}`);
 
-      // Get current price and calculate expected output
-      const priceResult = await this.getCurrentPrice(strategy.config.tokenIn, strategy.config.tokenOut);
-      if (!priceResult.success) {
-        throw new Error(`Failed to get price: ${priceResult.error}`);
-      }
-
-      execution.priceAtExecution = priceResult.price;
-      execution.expectedOutput = this.calculateExpectedOutput(
-        execution.swapAmount,
-        priceResult.price,
-        strategy.config.tokenIn,
-        strategy.config.tokenOut
-      );
-      // Build price context for AI analysis
-      const priceContext = await this.buildPriceContext(strategy, execution);
-      // Call AI decision engine
-      const aiDecision = await evaluateExecution(strategy, priceContext, execution);
-      console.log(`AI Decision: ${aiDecision.reason}`);
-      // Act on AI decision
-      if (!aiDecision.shouldExecute) {
-        execution.status = EXECUTION_STATUS.SKIPPED;
-        execution.error = aiDecision.reason;
-        execution.completedAt = Date.now();
-        await this.recordExecution(execution);
-        return {
-          success: false,
-          execution,
-          reason: 'ai_rejected',
-          aiAnalysis: aiDecision.analysis
-        };
-      }
-      // Adjust amount if AI recommends
-      if (aiDecision.adjustedAmount && aiDecision.adjustedAmount !== execution.swapAmount) {
-        console.log(`AI adjusted swap amount: ${formatTokenAmount(execution.swapAmount, strategy.config.tokenInDecimals)} → ${formatTokenAmount(aiDecision.adjustedAmount, strategy.config.tokenInDecimals)}`);
-        execution.swapAmount = aiDecision.adjustedAmount;
-        // Recalculate expected output
-        execution.expectedOutput = this.calculateExpectedOutput(
-          execution.swapAmount,
-          priceContext.spot,
-          strategy.config.tokenIn,
-          strategy.config.tokenOut
-        );
-      }
-      // Check slippage limits
-      if (!skipSlippageCheck) {
-        const slippageCheck = await this.checkSlippageLimits(strategy, execution);
-        if (!slippageCheck.acceptable) {
-          execution.status = EXECUTION_STATUS.SKIPPED;
-          execution.error = `Slippage too high: ${slippageCheck.currentSlippage}% > ${strategy.config.maxSlippage}%`;
-          execution.completedAt = Date.now();
-          
-          await this.recordExecution(execution);
-          return {
-            success: false,
-            execution,
-            reason: 'slippage_too_high'
-          };
-        }
-      }
-
-      // Execute the swap via delegation
+      // Execute swap via delegation (simplified - no AI checks)
       const swapResult = await this.executeSwapViaDelegation(strategy, execution);
       
       if (swapResult.success) {
@@ -431,7 +334,6 @@ class DCAEngineService {
         execution.gasCost = swapResult.gasCost;
         execution.slippage = this.calculateActualSlippage(execution);
 
-        // Update strategy state
         await this.updateStrategyAfterExecution(strategy, execution);
 
         console.log(`DCA execution ${executionId} completed successfully`);
@@ -439,13 +341,12 @@ class DCAEngineService {
         execution.status = EXECUTION_STATUS.FAILED;
         execution.error = swapResult.error;
         
-        // Update failure count
         strategy.state.failureCount++;
         
-        // Pause strategy if too many failures
         if (strategy.state.failureCount >= DCA_CONFIG.MAX_CONSECUTIVE_FAILURES) {
           strategy.state.status = STRATEGY_STATUS.PAUSED;
           strategy.state.pauseReason = 'too_many_failures';
+          this.cancelScheduledExecution(strategyId);
           console.warn(`Strategy ${strategyId} paused due to repeated failures`);
         }
 
@@ -464,7 +365,6 @@ class DCAEngineService {
     } catch (error) {
       console.error(`DCA execution ${executionId} failed:`, error);
       
-      // Update execution record
       const execution = this.activeExecutions.get(executionId) || {
         id: executionId,
         strategyId,
@@ -516,39 +416,35 @@ class DCAEngineService {
   }
 
   /**
- * Cancel a DCA strategy completely (cannot be resumed)
- */
-async cancelStrategy(strategyId, reason = 'user_cancelled') {
-  try {
-    const strategy = await this.getStrategy(strategyId);
-    if (!strategy) {
-      throw new Error('Strategy not found');
+   * Cancel a DCA strategy
+   */
+  async cancelStrategy(strategyId, reason = 'user_cancelled') {
+    try {
+      const strategy = await this.getStrategy(strategyId);
+      if (!strategy) {
+        throw new Error('Strategy not found');
+      }
+
+      strategy.state.status = STRATEGY_STATUS.CANCELLED;
+      strategy.state.updatedAt = Date.now();
+      strategy.state.cancelReason = reason;
+
+      this.cancelScheduledExecution(strategyId);
+
+      await this.saveStrategy(strategy);
+
+      console.log(`DCA strategy ${strategyId} cancelled (${reason})`);
+
+      return {
+        success: true,
+        status: STRATEGY_STATUS.CANCELLED,
+        reason
+      };
+    } catch (error) {
+      console.error('Failed to cancel DCA strategy:', error);
+      throw error;
     }
-
-    // Mark as cancelled
-    strategy.state.status = STRATEGY_STATUS.CANCELLED;
-    strategy.state.updatedAt = Date.now();
-    strategy.state.cancelReason = reason;
-
-    // Stop any future executions
-    this.cancelScheduledExecution(strategyId);
-
-    // Save and persist
-    await this.saveStrategy(strategy);
-
-    console.log(`DCA strategy ${strategyId} cancelled (${reason})`);
-
-    return {
-      success: true,
-      status: STRATEGY_STATUS.CANCELLED,
-      reason
-    };
-  } catch (error) {
-    console.error('Failed to cancel DCA strategy:', error);
-    throw error;
   }
-}
-
 
   /**
    * Resume a paused DCA strategy
@@ -572,7 +468,7 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
       await this.saveStrategy(strategy);
 
       // Reschedule execution
-      this.scheduleExecution(strategyId, strategy.state.nextExecutionAt);
+      this.scheduleRecurringExecution(strategyId, strategy);
 
       return {
         success: true,
@@ -604,8 +500,7 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
 
       const result = {
         ...strategy,
-        performance: await this.calculateStrategyPerformance(strategy),
-        gasAnalysis: await this.calculateGasAnalysis(strategy)
+        performance: await this.calculateStrategyPerformance(strategy)
       };
 
       if (includeExecutionHistory) {
@@ -633,7 +528,6 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     try {
       let strategies = Array.from(this.strategies.values());
 
-      // Load encrypted strategies
       await this.loadAllEncryptedStrategies();
       strategies = Array.from(this.strategies.values());
 
@@ -690,63 +584,25 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     const encoded = safeBase64Encode(key);
     return `dca_${encoded.replace(/[^a-zA-Z0-9]/g, '').substring(0, 32)}`;
   }
-  
 
   calculateNextExecution(config) {
     const now = Date.now();
-    const { frequency, startTime } = config;
-
-    let nextExecution = startTime || now;
-
-    switch (frequency) {
-      case DCA_FREQUENCIES.HOURLY:
-        nextExecution = now + (60 * 60 * 1000); // 1 hour
-        break;
-      case DCA_FREQUENCIES.DAILY:
-        nextExecution = now + (24 * 60 * 60 * 1000); // 24 hours
-        break;
-      case DCA_FREQUENCIES.WEEKLY:
-        nextExecution = now + (7 * 24 * 60 * 60 * 1000); // 7 days
-        break;
-      case DCA_FREQUENCIES.MONTHLY:
-        nextExecution = now + (30 * 24 * 60 * 60 * 1000); // 30 days
-        break;
-      default:
-        nextExecution = now + (24 * 60 * 60 * 1000); // Default to daily
+    const intervalConfig = SWAP_INTERVALS[config.interval?.toUpperCase()];
+    
+    if (!intervalConfig) {
+      return now;
     }
 
-    return nextExecution;
+    if (!intervalConfig.recurring) {
+      return now; // Immediate execution
+    }
+
+    return now + intervalConfig.intervalMs;
   }
 
   calculateSwapAmount(strategy) {
-    const { sizingMethod, swapAmount, percentageOfBalance } = strategy.config;
-
-    switch (sizingMethod) {
-      case SIZING_METHODS.FIXED_AMOUNT:
-        return parseUnits(swapAmount.toString(), strategy.config.tokenInDecimals);
-      
-      case SIZING_METHODS.PERCENTAGE_BALANCE:
-        // This would need to fetch current balance and calculate percentage
-        // For now, return fixed amount as fallback
-        return parseUnits(swapAmount.toString(), strategy.config.tokenInDecimals);
-      
-      default:
-        return parseUnits(swapAmount.toString(), strategy.config.tokenInDecimals);
-    }
-  }
-
-  calculateExpectedOutput(inputAmount, price, tokenIn, tokenOut) {
-    // Simple calculation - in production would use proper price feeds
-    const inputToken = SUPPORTED_TOKENS.find(t => t.symbol.toUpperCase() === tokenIn.toUpperCase());
-    const outputToken = SUPPORTED_TOKENS.find(t => t.symbol.toUpperCase() === tokenOut.toUpperCase());
-    
-    if (!inputToken || !outputToken) {
-      throw new Error('Unsupported token pair');
-    }
-
-    // Convert input amount to base units and calculate output
-    const inputInUSD = (inputAmount * price) / ((10n ** BigInt(inputToken.decimals)) * 10n ** 18n);
-    return inputInUSD * (10n ** BigInt(outputToken.decimals));
+    const { swapAmount } = strategy.config;
+    return parseUnits(swapAmount.toString(), strategy.config.tokenInDecimals || 18);
   }
 
   calculateActualSlippage(execution) {
@@ -761,18 +617,18 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
   calculateRiskScore(config) {
     let score = 0;
     
-    // Frequency risk (more frequent = higher risk)
-    if (config.frequency === DCA_FREQUENCIES.HOURLY) score += 30;
-    else if (config.frequency === DCA_FREQUENCIES.DAILY) score += 20;
-    else if (config.frequency === DCA_FREQUENCIES.WEEKLY) score += 10;
+    const intervalConfig = SWAP_INTERVALS[config.interval?.toUpperCase()];
+    if (intervalConfig) {
+      if (intervalConfig.id === 'per_minute') score += 30;
+      else if (intervalConfig.id === 'hourly') score += 20;
+      else if (intervalConfig.id === 'daily') score += 10;
+    }
     
-    // Amount risk (higher amounts = higher risk)
     if (config.swapAmount > 1000) score += 25;
     else if (config.swapAmount > 100) score += 15;
     else score += 5;
     
-    // Slippage tolerance risk
-    const slippagePercent = config.maxSlippage * 100
+    const slippagePercent = config.maxSlippage * 100;
     if (slippagePercent > 5) score += 20;
     else if (slippagePercent > 2) score += 10;
     else score += 5;
@@ -780,37 +636,25 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     return Math.min(score, 100);
   }
 
-  async getCurrentPrice(tokenIn, tokenOut) {
-    try{
-      const price = await priceOracle.getPrice(tokenIn, tokenOut);
-      return{
-        success: true,
-        price,
-        timestamp:Date.now(),
-        source: 'pyth_oracle'
-      };
-    } catch (error){
-      return {success:false, error: error.message};
-
-    }
-  }
-
-  async checkSlippageLimits(strategy, execution) {
-    // Implementation would check current market conditions
-    return {
-      acceptable: true,
-      currentSlippage: 1.5,
-      maxAllowed: strategy.config.maxSlippage
-    };
-  }
-
   async executeSwapViaDelegation(strategy, execution) {
     try {
-      // Convert maxSlippage (e.g. 0.05 = 5%) into basis points (500 bps)
-      const SlippageBps = BigInt(Math.floor(strategy.config.maxSlippage * 10000));
+      const slippageBps = BigInt(Math.floor(strategy.config.maxSlippage * 10000));
+      
+      // Get quote first
+      const quoteResult = await swapExecutor.getSwapQuote({
+        tokenIn: strategy.config.tokenIn,
+        tokenOut: strategy.config.tokenOut,
+        amountIn: execution.swapAmount,
+        tokenInDecimals: strategy.config.tokenInDecimals || 18,
+        tokenOutDecimals: strategy.config.tokenOutDecimals || 18
+      });
 
-      // minAmountOut = expectedOutput * (10000 - slippageBps) / 10000
-      const minAmountOut =(execution.expectedOutput * (10000n - slippageBps)) / 10000n;
+      if (!quoteResult.success) {
+        throw new Error(`Quote failed: ${quoteResult.error}`);
+      }
+
+      const minAmountOut = quoteResult.quote.minAmountOut;
+
       const swapResult = await delegationService.executeDCASwap(
         strategy.delegation.id,
         {
@@ -819,7 +663,7 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
           amountIn: execution.swapAmount,
           minAmountOut,
           recipient: strategy.config.smartAccount,
-          deadline: Math.floor(Date.now() / 1000) + 300 // 5 minutes
+          deadline: Math.floor(Date.now() / 1000) + 300
         }
       );
 
@@ -839,21 +683,18 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     strategy.state.totalInvested += execution.swapAmount;
     strategy.state.totalReceived += execution.actualOutput;
     strategy.state.lastExecutionAt = execution.completedAt;
-    strategy.state.failureCount = 0; // Reset failure count on success
+    strategy.state.failureCount = 0;
     strategy.metadata.gasSpent += execution.gasCost;
 
-    // Update average price
     const totalReceived = Number(strategy.state.totalReceived);
     const totalInvested = Number(strategy.state.totalInvested);
     if (totalReceived > 0) {
       strategy.state.averagePrice = parseUnits((totalInvested / totalReceived).toString(), 18);
     }
 
-    // Schedule next execution
     strategy.state.nextExecutionAt = this.calculateNextExecution(strategy.config);
 
     await this.saveStrategy(strategy);
-    this.scheduleExecution(strategy.id, strategy.state.nextExecutionAt);
   }
 
   async recordExecution(execution) {
@@ -863,7 +704,6 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     
     this.executionHistory.get(execution.strategyId).push(execution);
     
-    // Keep only last 100 executions per strategy
     const history = this.executionHistory.get(execution.strategyId);
     if (history.length > 100) {
       this.executionHistory.set(execution.strategyId, history.slice(-100));
@@ -887,59 +727,12 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     };
   }
 
-  async calculateGasAnalysis(strategy) {
-    const totalGasSpent = Number(formatUnits(strategy.metadata.gasSpent, 18));
-    const avgGasPerExecution = strategy.state.successfulExecutions > 0 ? 
-      totalGasSpent / strategy.state.successfulExecutions : 0;
-
-    return {
-      totalGasSpent,
-      averageGasPerExecution: avgGasPerExecution,
-      estimatedGasForNext: avgGasPerExecution,
-      gasEfficiencyScore: this.calculateGasEfficiency(strategy)
-    };
-  }
-
-  calculateGasEfficiency(strategy) {
-    const gasSpent = Number(formatUnits(strategy.metadata.gasSpent, 18));
-    const totalValue = Number(formatUnits(strategy.state.totalInvested, 18));
-    
-    if (totalValue === 0) return 0;
-    
-    const gasRatio = gasSpent / totalValue;
-    
-    // Lower gas ratio = higher efficiency score
-    if (gasRatio < 0.001) return 95;
-    if (gasRatio < 0.005) return 85;
-    if (gasRatio < 0.01) return 70;
-    if (gasRatio < 0.02) return 50;
-    return 30;
-  }
-
-  scheduleExecution(strategyId, executionTime) {
-    // Clear existing scheduled job
-    this.cancelScheduledExecution(strategyId);
-
-    const delay = executionTime - Date.now();
-    if (delay > 0) {
-      const timeoutId = setTimeout(async () => {
-        try {
-          await this.executeSwap(strategyId);
-        } catch (error) {
-          console.error(`Scheduled execution failed for strategy ${strategyId}:`, error);
-        }
-      }, delay);
-
-      this.scheduledJobs.set(strategyId, timeoutId);
-      console.log(`Scheduled execution for strategy ${strategyId} in ${Math.round(delay / 1000)} seconds`);
-    }
-  }
-
   cancelScheduledExecution(strategyId) {
-    const timeoutId = this.scheduledJobs.get(strategyId);
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-      this.scheduledJobs.delete(strategyId);
+    const intervalId = this.scheduledIntervals.get(strategyId);
+    if (intervalId) {
+      clearInterval(intervalId);
+      this.scheduledIntervals.delete(strategyId);
+      console.log(`Cancelled scheduled execution for strategy ${strategyId}`);
     }
   }
 
@@ -947,7 +740,7 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     try {
       const delegationConfig = {
         delegator: strategy.config.smartAccount,
-        delegate: strategy.config.dcaAgent, // DCA agent address
+        delegate: strategy.config.dcaAgent,
         type: 'dca_strategy',
         caveats: [
           {
@@ -962,13 +755,7 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
             type: 'time_range',
             terms: {
               start: Date.now(),
-              end: strategy.config.endTime || Date.now() + (365 * 24 * 60 * 60 * 1000) // 1 year default
-            }
-          },
-          {
-            type: 'function_whitelist',
-            terms: {
-              functions: ['swapExactTokensForTokens', 'multicall']
+              end: strategy.config.endTime || Date.now() + (365 * 24 * 60 * 60 * 1000)
             }
           }
         ]
@@ -986,7 +773,6 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
 
   async encryptAndStoreStrategy(strategy) {
     const encryptedData = await encryptAndStore(strategy, 'STRATEGY_CONFIG');
-    // Store reference in memory with encryption flag
     this.strategies.set(strategy.id, {
       id: strategy.id,
       encrypted: true,
@@ -1018,13 +804,11 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
   }
 
   async loadStrategiesFromStorage() {
-    // Implementation would load from persistent storage
     console.log('Loading DCA strategies from storage...');
-    // For now, start with empty state - in production would load from secure storage
+    // In production, load from secure storage
   }
 
   async loadAllEncryptedStrategies() {
-    // Load all encrypted strategy references and decrypt them
     const encryptedRefs = Array.from(this.strategies.values()).filter(s => s.encrypted);
     
     for (const ref of encryptedRefs) {
@@ -1045,10 +829,7 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     const history = this.executionHistory.get(strategyId) || [];
     const total = history.length;
     
-    // Sort by execution time (newest first)
     const sortedHistory = [...history].sort((a, b) => b.startedAt - a.startedAt);
-    
-    // Apply pagination
     const paginatedHistory = sortedHistory.slice(offset, offset + limit);
     
     return {
@@ -1064,14 +845,16 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
 
   async validateStrategyBalance(strategy) {
     try {
-      const balance = await monadClient.getBalance(strategy.config.smartAccount, strategy.config.tokenIn);
+      const balance = await monadClient.getBalance({
+        address: strategy.config.smartAccount
+      });
       const requiredAmount = this.calculateSwapAmount(strategy);
-      const gasReserve = parseUnits('0.1', 18); // Reserve 0.1 MON for gas
+      const gasReserve = parseUnits('0.1', 18);
       
       return {
         sufficient: balance >= requiredAmount + gasReserve,
-        available: formatUnits(balance, strategy.config.tokenInDecimals),
-        required: formatUnits(requiredAmount, strategy.config.tokenInDecimals),
+        available: formatUnits(balance, strategy.config.tokenInDecimals || 18),
+        required: formatUnits(requiredAmount, strategy.config.tokenInDecimals || 18),
         gasReserve: formatUnits(gasReserve, 18)
       };
     } catch (error) {
@@ -1083,47 +866,10 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     }
   }
 
-  async estimateStrategyGasCosts(strategy) {
-    try {
-      const swapGasEstimate = await gasEstimator.estimateOperationGas('uniswap_swap', {
-        tokenIn: strategy.config.tokenIn,
-        tokenOut: strategy.config.tokenOut,
-        amount: this.calculateSwapAmount(strategy)
-      });
-
-      const executionsPerPeriod = this.calculateExecutionsPerPeriod(strategy.config.frequency);
-      const totalExecutions = strategy.config.totalExecutions || 100; // Default estimate
-      
-      return {
-        gasPerSwap: swapGasEstimate.gasLimit,
-        gasCostPerSwap: swapGasEstimate.totalCostMON,
-        totalGasLimit: swapGasEstimate.gasLimit * BigInt(totalExecutions),
-        totalCostMON: swapGasEstimate.totalCostMON * BigInt(totalExecutions),
-        executionsPerMonth: executionsPerPeriod * 30, // Rough monthly estimate
-        monthlyCostMON: (swapGasEstimate.totalCostMON * executionsPerPeriod * 30)
-      };
-    } catch (error) {
-      console.error('Gas estimation failed:', error);
-      throw error;
-    }
-  }
-
-  calculateExecutionsPerPeriod(frequency) {
-    switch (frequency) {
-      case DCA_FREQUENCIES.HOURLY: return 24; // Per day
-      case DCA_FREQUENCIES.DAILY: return 1; // Per day
-      case DCA_FREQUENCIES.WEEKLY: return 1/7; // Per day
-      case DCA_FREQUENCIES.MONTHLY: return 1/30; // Per day
-      default: return 1;
-    }
-  }
-
   sanitizeStrategyForResponse(strategy) {
-    // Remove sensitive data before sending to frontend
     const sanitized = { ...strategy };
     
     if (sanitized.delegation) {
-      // Remove sensitive delegation data
       delete sanitized.delegation.signature;
       delete sanitized.delegation.salt;
     }
@@ -1131,81 +877,13 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     return sanitized;
   }
 
-  async startScheduler() {
-    if (this.schedulerRunning) return;
-
-    this.schedulerRunning = true;
-    
-    // Check for pending executions every minute
-    this.schedulerTimer = setInterval(async () => {
-      try {
-        await this.processScheduledExecutions();
-      } catch (error) {
-        console.error('Scheduler error:', error);
-      }
-    }, 60 * 1000); // 1 minute interval
-
-    console.log('DCA execution scheduler started');
-  }
-
-  async processScheduledExecutions() {
-    const now = Date.now();
-    const pendingExecutions = [];
-
-    // Find strategies with pending executions
-    for (const [strategyId, strategy] of this.strategies.entries()) {
-      if (strategy.encrypted) continue; // Skip encrypted references
-
-      if (strategy.state.status === STRATEGY_STATUS.ACTIVE && 
-          strategy.state.nextExecutionAt && 
-          strategy.state.nextExecutionAt <= now) {
-        pendingExecutions.push(strategyId);
-      }
-    }
-
-    // Execute pending swaps
-    for (const strategyId of pendingExecutions) {
-      try {
-        console.log(`Processing scheduled execution for strategy ${strategyId}`);
-        await this.executeSwap(strategyId);
-      } catch (error) {
-        console.error(`Scheduled execution failed for strategy ${strategyId}:`, error);
-        
-        // Handle persistent failures
-        const strategy = await this.getStrategy(strategyId);
-        if (strategy && strategy.state.failureCount >= DCA_CONFIG.MAX_CONSECUTIVE_FAILURES) {
-          await this.pauseStrategy(strategyId, 'repeated_failures');
-        }
-      }
-    }
-  }
-
-  stopScheduler() {
-    if (this.schedulerTimer) {
-      clearInterval(this.schedulerTimer);
-      this.schedulerTimer = null;
-    }
-    this.schedulerRunning = false;
-    
-    // Clear all scheduled jobs
-    for (const timeoutId of this.scheduledJobs.values()) {
-      clearTimeout(timeoutId);
-    }
-    this.scheduledJobs.clear();
-    
-    console.log('DCA execution scheduler stopped');
-  }
-
-  /**
-   * Get engine statistics and health metrics
-   */
   getEngineStats() {
     const activeStrategies = Array.from(this.strategies.values())
-      .filter(s => !s.encrypted && s.state.status === STRATEGY_STATUS.ACTIVE).length;
+      .filter(s => !s.encrypted && s.state?.status === STRATEGY_STATUS.ACTIVE).length;
     
     const totalStrategies = this.strategies.size;
     const activeExecutions = this.activeExecutions.size;
-    const scheduledJobs = this.scheduledJobs.size;
+    const scheduledJobs = this.scheduledIntervals.size;
 
     return {
       strategies: {
@@ -1217,43 +895,33 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
         active: activeExecutions,
         scheduled: scheduledJobs
       },
-      scheduler: {
-        running: this.schedulerRunning,
-        lastCheck: Date.now()
-      },
-      memory: {
-        strategiesSize: this.strategies.size,
-        executionHistorySize: Array.from(this.executionHistory.values()).reduce((sum, arr) => sum + arr.length, 0),
-        activeCacheSize: this.activeExecutions.size
-      },
       initialized: this.initialized
     };
   }
 
-  /**
-   * Emergency stop all active strategies
-   */
   async emergencyStop(reason = 'manual_emergency_stop') {
     console.warn(`Emergency stop initiated: ${reason}`);
     
     const stoppedStrategies = [];
     
     try {
-      // Stop scheduler
-      this.stopScheduler();
+      // Stop all intervals
+      for (const [strategyId, intervalId] of this.scheduledIntervals.entries()) {
+        clearInterval(intervalId);
+        stoppedStrategies.push(strategyId);
+      }
+      this.scheduledIntervals.clear();
       
       // Pause all active strategies
       for (const [strategyId, strategy] of this.strategies.entries()) {
-        if (!strategy.encrypted && strategy.state.status === STRATEGY_STATUS.ACTIVE) {
+        if (!strategy.encrypted && strategy.state?.status === STRATEGY_STATUS.ACTIVE) {
           await this.pauseStrategy(strategyId, reason);
-          stoppedStrategies.push(strategyId);
         }
       }
       
-      // Clear active executions
       this.activeExecutions.clear();
       
-      console.log(`Emergency stop completed: ${stoppedStrategies.length} strategies paused`);
+      console.log(`Emergency stop completed: ${stoppedStrategies.length} strategies stopped`);
       
       return {
         success: true,
@@ -1266,16 +934,14 @@ async cancelStrategy(strategyId, reason = 'user_cancelled') {
     }
   }
 
-  /**
-   * Cleanup resources and prepare for shutdown
-   */
   destroy() {
-    this.stopScheduler();
+    for (const intervalId of this.scheduledIntervals.values()) {
+      clearInterval(intervalId);
+    }
+    this.scheduledIntervals.clear();
     this.strategies.clear();
     this.activeExecutions.clear();
     this.executionHistory.clear();
-    this.priceCache.clear();
-    this.scheduledJobs.clear();
     this.initialized = false;
     
     console.log('DCAEngineService destroyed');
@@ -1339,7 +1005,7 @@ export const getDCAEngineStats = () => dcaEngine.getEngineStats();
 export const emergencyStopDCA = (reason) => dcaEngine.emergencyStop(reason);
 export const cancelDCAStrategy = (id, reason) => dcaEngine.cancelStrategy(id, reason);
 
-// ===== SIMPLE ALIASES (for hooks & UI) =====
+// ===== SIMPLE ALIASES =====
 export const createStrategy = createDCAStrategy;
 export const startStrategy = startDCAStrategy;
 export const executeSwap = executeDCASwap;
@@ -1355,7 +1021,5 @@ export {
   DCAEngineService,
   dcaEngine,
   STRATEGY_STATUS,
-  EXECUTION_STATUS,
-  DCA_FREQUENCIES,
-  SIZING_METHODS
+  EXECUTION_STATUS
 };

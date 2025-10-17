@@ -32,6 +32,7 @@ const OPERATION_GAS_ESTIMATES = {
   ADD_LIQUIDITY: 300000,
   REMOVE_LIQUIDITY: 250000,
   COLLECT_FEES: 100000,
+  UNISWAP_SWAP: 200000,
   
   // Oracle operations
   PYTH_PRICE_UPDATE: 45000,
@@ -104,6 +105,14 @@ export class MonadGasEstimator {
    * @returns {object} Gas estimation with multiple tiers
    */
   async estimateOperationGas(operationType, params = {}) {
+    // Normalize operation type to uppercase key
+    const normalizedType = operationType.toUpperCase();
+
+    // Backward compatibility: allow 'uniswap_swap'
+    if (normalizedType === 'UNISWAP_SWAP' || operationType === 'uniswap_swap') {
+      operationType = 'UNISWAP_SWAP';
+    }
+
     if (!OPERATION_GAS_ESTIMATES[operationType]) {
       throw new Error(`Unknown operation type: ${operationType}`);
     }

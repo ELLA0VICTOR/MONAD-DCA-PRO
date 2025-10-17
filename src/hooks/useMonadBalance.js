@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { formatUnits, parseUnits } from 'viem';
-import { convertBalanceToUSD } from '../services/dca/priceOracle';
+import { convertBalanceToUSD } from '../utils/priceUtils'
 
 // Services
 import { monadClient } from '../services/monad/monadClient';

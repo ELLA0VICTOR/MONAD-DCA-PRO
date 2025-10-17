@@ -258,13 +258,21 @@ export class MonadClient {
   
       if (!tokenAddress) {
         // ✅ Native MON balance
-        const balance = await this.publicClient.getBalance({ address });
+        const addr =
+        typeof address === "string"
+          ? address
+          : address?.address || address?.account || address;
+        const balance = await this.publicClient.request({
+          method: "eth_getBalance",
+          params: [addr, "latest"], // ✅ correct JSON-RPC params
+        });
+        const balanceBigInt = BigInt(balance);
         data = {
-          balance: balance.toString(),
-          formatted: formatUnits(balance, 18),
-          symbol: "MON",
-          decimals: 18,
-        };
+          balance: balanceBigInt.toString(),
+            formatted: formatUnits(balanceBigInt, 18),
+            symbol: "MON",
+            decimals: 18,
+          };
       } else {
         // ✅ ERC-20 token balance
         const [balance, decimals, symbol] = await Promise.all([
@@ -310,6 +318,27 @@ export class MonadClient {
       return cached?.data || null; // fallback to last cached value if exists
     }
   }
+  /**
+  * Get on-chain bytecode of a deployed contract
+  * @param {object} params - { address: string }
+  * @returns {Promise<string>} Contract bytecode (hex string)
+  */
+  async getBytecode({ address }) {
+    if (!address) {
+      throw new Error('Address is required');
+    }
+    if (!this.publicClient) {
+      await this.initialize(); // ensure client ready
+      }
+      try {
+        const bytecode = await this.publicClient.getCode({ address });
+        return bytecode || '0x';
+      } catch (error) {
+        console.error(`[monadClient] getBytecode failed for ${address}:`, error.message);
+        return '0x';
+      }
+    }
+  
   
   
 
