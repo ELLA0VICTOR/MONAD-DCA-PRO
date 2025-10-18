@@ -3,17 +3,15 @@ import {
   toMetaMaskSmartAccount,
 } from '@metamask/delegation-toolkit';
 import { getAddress, keccak256, encodePacked } from 'viem';
-import { toPackedUserOperation } from 'viem/account-abstraction';
 import { 
   MONAD_CONFIG, 
   SMART_ACCOUNT_CONFIG, 
   CONTRACTS, 
   GAS_LIMITS,
-  FASTLANE_CONFIG 
+  ALCHEMY_CONFIG 
 } from '../../utils/constants.js';
 import { monadClient } from '../monad/monadClient.js';
 import { gasEstimator } from '../monad/gasEstimator.js';
-import { preparePaymasterContext } from './paymasterHelper.js';
 
 // ===== SMART ACCOUNT TYPES =====
 
@@ -123,7 +121,7 @@ export class SmartAccountFactory {
   }
 
   /**
-   * ✅ FIXED: Deploy using Fastlane with proper sponsor signature
+   * ✅ Deploy using Alchemy Gas Manager (simplified - no sponsor signatures)
    */
   async deploySmartAccount(smartAccount, firstTransaction = null) {
     if (!smartAccount || !smartAccount.account) {
@@ -137,12 +135,12 @@ export class SmartAccountFactory {
     }
 
     try {
-      console.log('🚀 [Deploy] Starting deployment via Fastlane bundler for:', smartAccount.address);
+      console.log('🚀 [Deploy] Starting deployment via Alchemy bundler for:', smartAccount.address);
 
       smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYING;
       this.pendingDeployments.set(accountAddress, Date.now());
 
-      // ✅ Import Fastlane bundler
+      // ✅ Import Alchemy bundler
       const { bundlerClient } = await import('../smartAccount/bundlerClient.js');
 
       // Prepare minimal deployment call
@@ -152,73 +150,29 @@ export class SmartAccountFactory {
         value: 0n
       };
 
-      console.log('🔧 Step 1: Preparing user operation...');
+      console.log('🔧 Step 1: Preparing user operation with Alchemy Gas Manager...');
 
-      // ✅ STEP 1: Create basic smart account client WITHOUT paymaster first
-      const basicClient = await bundlerClient.createSmartAccountClient(smartAccount.account, {
-        sponsorUserOperation: false // Don't enable paymaster yet
+      // ✅ Create smart account client with Alchemy sponsorship
+      const smartAccountClient = await bundlerClient.createSmartAccountClient(smartAccount.account, {
+        sponsorUserOperation: true // Enable Alchemy Gas Manager
       });
 
-      // ✅ STEP 2: Prepare the user operation (gets gas estimates)
-      const preparedUserOp = await basicClient.prepareUserOperation({
-        account: smartAccount.account,
-        calls: [call]
-      });
+      // ✅ Prepare and send the user operation with paymasterContext
+      console.log('📤 Sending user operation to Alchemy bundler...');
 
-      console.log('✅ User operation prepared:', {
-        sender: preparedUserOp.sender,
-        nonce: preparedUserOp.nonce?.toString(),
-        callGasLimit: preparedUserOp.callGasLimit?.toString(),
-        verificationGasLimit: preparedUserOp.verificationGasLimit?.toString(),
-        preVerificationGas: preparedUserOp.preVerificationGas?.toString()
-      });
-
-      // ✅ STEP 3: Get paymaster address
-      const paymasterAddress = await bundlerClient.getPaymasterAddress();
-      
-      if (!paymasterAddress) {
-        throw new Error('Failed to get paymaster address');
-      }
-
-      console.log('💰 Paymaster address:', paymasterAddress);
-
-      // ✅ STEP 4: Convert to packed format for signing
-      const packedUserOp = toPackedUserOperation(preparedUserOp);
-
-      console.log('📦 Packed user operation for signing');
-
-      // ✅ STEP 5: Prepare paymaster context with sponsor signature
-      const paymasterContext = await preparePaymasterContext(
-        packedUserOp,
-        paymasterAddress,
-        BigInt(MONAD_CONFIG.chainId)
-      );
-
-      console.log('✅ Paymaster context prepared with sponsor signature');
-
-      // ✅ STEP 6: Send the user operation with sponsor context
-      console.log('📤 Sending user operation to Fastlane bundler...');
-
-      const userOpHash = await bundlerClient.bundlerClient.sendUserOperation({
-        account: smartAccount.account,
+      const userOpHash = await smartAccountClient.sendUserOperation({
         calls: [call],
-        // ✅ CRITICAL: Include gas values from preparation
-        nonce: preparedUserOp.nonce,
-        callGasLimit: preparedUserOp.callGasLimit,
-        verificationGasLimit: preparedUserOp.verificationGasLimit,
-        preVerificationGas: preparedUserOp.preVerificationGas,
-        maxFeePerGas: preparedUserOp.maxFeePerGas,
-        maxPriorityFeePerGas: preparedUserOp.maxPriorityFeePerGas,
-        // ✅ CRITICAL: Include paymaster context
-        paymasterContext
+        paymasterContext: {
+          policyId: ALCHEMY_CONFIG.POLICY_ID
+        }
       });
 
       console.log('✅ User operation submitted:', userOpHash);
 
-      // ✅ STEP 7: Wait for user operation receipt
+      // ✅ Wait for user operation receipt
       console.log('⏳ Waiting for user operation receipt...');
 
-      const receipt = await bundlerClient.bundlerClient.waitForUserOperationReceipt({
+      const receipt = await smartAccountClient.waitForUserOperationReceipt({
         hash: userOpHash
       });
 
@@ -241,7 +195,7 @@ export class SmartAccountFactory {
       this.storeAccountForEOA(smartAccount.owner, smartAccount);
       this.pendingDeployments.delete(accountAddress);
 
-      console.log(`✅ Smart account deployed via Fastlane: ${smartAccount.address}`);
+      console.log(`✅ Smart account deployed via Alchemy: ${smartAccount.address}`);
       console.log(`✅ Transaction hash: ${txHash}`);
       
       return txHash;

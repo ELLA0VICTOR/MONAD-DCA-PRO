@@ -175,8 +175,9 @@ const SwapTab = () => {
       setPrices(prev => ({ ...prev, loading: true }));
   
       try {
-        let fromTokenInfo = Object.values(SUPPORTED_TOKENS).find(t => t.symbol === formData.fromToken);
-        let toTokenInfo = Object.values(SUPPORTED_TOKENS).find(t => t.symbol === formData.toToken);
+        // ✅ Get token info from SUPPORTED_TOKENS
+        const fromTokenInfo = Object.values(SUPPORTED_TOKENS).find(t => t.symbol === formData.fromToken);
+        const toTokenInfo = Object.values(SUPPORTED_TOKENS).find(t => t.symbol === formData.toToken);
   
         if (!fromTokenInfo || !toTokenInfo) {
           console.error("❌ Token not found");
@@ -184,14 +185,13 @@ const SwapTab = () => {
           return;
         }
   
-        // ✅ FIX: Always use the token address directly
-        // The swapExecutor will handle WMON conversion internally
-        const tokenInAddress = fromTokenInfo.address;
-        const tokenOutAddress = toTokenInfo.address;
+        // ✅ Prepare token addresses for quote
+        // For native MON, pass null and let swapExecutor normalize it
+        const tokenInAddress = fromTokenInfo.isNative ? null : fromTokenInfo.address;
+        const tokenOutAddress = toTokenInfo.isNative ? null : toTokenInfo.address;
   
         const amountIn = parseUnits(formData.amount, fromTokenInfo.decimals);
   
-        // ✅ Validate amountIn
         if (amountIn === 0n) {
           console.warn("⚠️ Amount is zero");
           setPrices({ spot: 0, loading: false });
@@ -205,19 +205,22 @@ const SwapTab = () => {
         };
   
         console.log(`🔄 Fetching quote: ${formData.amount} ${formData.fromToken} -> ${formData.toToken}`);
-        console.log(`   Token addresses: ${swapParams.tokenIn} -> ${swapParams.tokenOut}`);
+        console.log(`   Token addresses: ${swapParams.tokenIn || 'native'} -> ${swapParams.tokenOut || 'native'}`);
         console.log(`   Amount in wei: ${swapParams.amountIn.toString()}`);
   
         const quoteResult = await swapExecutor.getSwapQuote(swapParams);
   
         if (quoteResult.success && quoteResult.quote?.amountOut) {
-          const rate =
-            Number(quoteResult.quote.amountOut) /
-            Math.pow(10, toTokenInfo.decimals) /
-            parseFloat(formData.amount);
+          // ✅ FIX: Properly format the quote to human-readable values
+          const outputAmountFormatted = Number(quoteResult.quote.amountOut) / Math.pow(10, toTokenInfo.decimals);
+          const inputAmountFormatted = parseFloat(formData.amount);
+          const rate = outputAmountFormatted / inputAmountFormatted;
           
-          console.log(`✅ Quote rate: 1 ${formData.fromToken} = ${rate.toFixed(6)} ${formData.toToken}`);
-          console.log(`✅ Expected output: ${(Number(quoteResult.quote.amountOut) / Math.pow(10, toTokenInfo.decimals)).toFixed(6)} ${formData.toToken}`);
+          console.log(`✅ Quote received:`);
+          console.log(`   Rate: 1 ${formData.fromToken} = ${rate.toFixed(6)} ${formData.toToken}`);
+          console.log(`   Expected output: ${outputAmountFormatted.toFixed(6)} ${formData.toToken}`);
+          console.log(`   Min output (with slippage): ${(Number(quoteResult.quote.minAmountOut) / Math.pow(10, toTokenInfo.decimals)).toFixed(6)} ${formData.toToken}`);
+          
           setPrices({ spot: rate, loading: false });
         } else {
           console.warn("⚠️ Quote failed:", quoteResult.error);
@@ -237,7 +240,7 @@ const SwapTab = () => {
     const timeoutId = setTimeout(fetchQuote, 500);
     return () => clearTimeout(timeoutId);
   }, [formData.amount, formData.fromToken, formData.toToken]);
-  
+ 
   
   const handleChange = (field, value) => {
     setFormData(prev => ({ ...prev, [field]: value }));

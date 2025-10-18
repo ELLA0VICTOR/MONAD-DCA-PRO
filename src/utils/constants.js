@@ -45,6 +45,40 @@ export const SMART_ACCOUNT_CONFIG = {
   deterministicAddresses: true
 };
 
+// ===== ALCHEMY CONFIGURATION =====
+export const ALCHEMY_CONFIG = {
+  // ✅ Alchemy API endpoint
+  API_KEY: import.meta.env.VITE_ALCHEMY_API_KEY || 'U54mFOLQ4a_b7vuvvl4Im',
+  
+  // ✅ Gas Manager Policy ID
+  POLICY_ID: import.meta.env.VITE_ALCHEMY_POLICY_ID || '616d93c3-3372-4353-8885-bb7b86822708',
+  
+  // Endpoint URLs (auto-constructed)
+  get BUNDLER_URL() {
+    return `https://monad-testnet.g.alchemy.com/v2/${this.API_KEY}`;
+  },
+  get PAYMASTER_URL() {
+    return `https://monad-testnet.g.alchemy.com/v2/${this.API_KEY}`;
+  }
+};
+
+// ✅ Validation on load
+if (typeof window !== 'undefined') {
+  console.log('🔍 ALCHEMY_CONFIG loaded:', {
+    hasAPIKey: !!ALCHEMY_CONFIG.API_KEY,
+    hasPolicyID: !!ALCHEMY_CONFIG.POLICY_ID,
+    apiKeyLength: ALCHEMY_CONFIG.API_KEY?.length || 0,
+    policyIdLength: ALCHEMY_CONFIG.POLICY_ID?.length || 0
+  });
+  
+  if (!ALCHEMY_CONFIG.API_KEY) {
+    console.warn('⚠️ VITE_ALCHEMY_API_KEY is not set!');
+  }
+  if (!ALCHEMY_CONFIG.POLICY_ID) {
+    console.warn('⚠️ VITE_ALCHEMY_POLICY_ID is not set!');
+  }
+}
+
 // ===== CONTRACT ADDRESSES (Monad Testnet) =====
 export const CONTRACTS = {
   // ===== Account Abstraction Infrastructure =====
@@ -58,7 +92,6 @@ export const CONTRACTS = {
   NonfungiblePositionManager: "0x3dcc735c74f10fe2b9db2bb55c40fbbbf24490f7",
   Multicall3: "0xcA11bde05977b3631167028862bE2a173976CA11",
   SwapRouter02: "0x4c4eabd5fb1d1a7234a48692551eaecff8194ca7",
-
   
   // ===== Token Addresses =====
   WMON: "0x760AfE86e5de5fa0Ee542fc7B7B713e1c5425701", // Wrapped MON
@@ -76,23 +109,6 @@ export const CONTRACTS = {
   TimeRangeEnforcer: "0x18808aE7b6a6F84c35dCC494ec5ACC7cFC2c17a4",
   DCAVault: "0x0000000000000000000000000000000000000000" // To be deployed
 };
-
-// ===== FASTLANE CONFIGURATION =====
-export const FASTLANE_CONFIG = {
-  BUNDLER_URL: import.meta.env.VITE_BUNDLER_URL || 'https://monad-testnet.4337-shbundler-fra.fastlane-labs.xyz',
-  PAYMASTER_URL: import.meta.env.VITE_PAYMASTER_URL || 'https://monad-testnet.4337-shbundler-fra.fastlane-labs.xyz',
-  ADDRESS_HUB: '0xC9f0cDE8316AbC5Efc8C3f5A6b571e815C021B51',
-  // ✅ CRITICAL: Your EOA that bonded shMON
-  SPONSOR_EOA: import.meta.env.VITE_SPONSOR_EOA || '0x3dECa38860de5dBa2eC1292f0286495fCbEF09e5'
-};
-
-// ✅ Add validation on load
-if (typeof window !== 'undefined') {
-  console.log('🔍 FASTLANE_CONFIG loaded:', {
-    SPONSOR_EOA: FASTLANE_CONFIG.SPONSOR_EOA,
-    isValidAddress: /^0x[a-fA-F0-9]{40}$/.test(FASTLANE_CONFIG.SPONSOR_EOA)
-  });
-}
 
 // ===== GAS ESTIMATION CONSTANTS =====
 export const GAS_LIMITS = {
@@ -118,7 +134,7 @@ export const GAS_LIMITS = {
   bufferMultiplier: 1.2
 };
 
-// ===== SWAP INTERVALS (NEW) =====
+// ===== SWAP INTERVALS =====
 export const SWAP_INTERVALS = {
   IMMEDIATE: {
     id: 'immediate',
@@ -295,16 +311,26 @@ export const ERROR_CODES = {
   SCHEDULE_CONFLICT: "SCHEDULE_CONFLICT"
 };
 
-// ===== SUPPORTED TOKENS (Cleaned - no price feeds) =====
+// ===== SUPPORTED TOKENS =====
 export const SUPPORTED_TOKENS = {
   MON: {
     symbol: "MON",
     name: "Monad",
-    address: CONTRACTS.WMON,
+    address: null,
     decimals: 18,
     isNative: true,
     minAmount: 0.001
   },
+  WMON: {
+    symbol: "WMON",
+    name: "Wrapped Monad",
+    address: CONTRACTS.WMON,  
+    decimals: 18,
+    isNative: false,          
+    isWrappedNative: true,    
+    minAmount: 0.001
+  },
+  
   USDC: {
     symbol: "USDC",
     name: "USD Coin",
@@ -400,22 +426,25 @@ export const GAS_PRICE_TIERS = {
 // ===== ENVIRONMENT VALIDATION =====
 export const validateEnvironment = () => {
   const requiredEnvVars = [
-    'VITE_MONAD_RPC_URL'
+    'VITE_MONAD_RPC_URL',
+    'VITE_ALCHEMY_API_KEY',
+    'VITE_ALCHEMY_POLICY_ID'
   ];
   
   const missing = requiredEnvVars.filter(key => !import.meta.env[key]);
   
   if (missing.length > 0) {
-    console.warn(`Missing environment variables: ${missing.join(', ')}`);
+    console.warn(`⚠️ Missing environment variables: ${missing.join(', ')}`);
   }
   
-  return true;
+  return missing.length === 0;
 };
 
 // ===== EXPORTS =====
 export default {
   MONAD_CONFIG,
   SMART_ACCOUNT_CONFIG,
+  ALCHEMY_CONFIG,
   CONTRACTS,
   GAS_LIMITS,
   SWAP_INTERVALS,
