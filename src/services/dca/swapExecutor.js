@@ -19,6 +19,8 @@ const SWAP_ROUTER_ABI = Array.isArray(SWAP_ROUTER_JSON) ? SWAP_ROUTER_JSON : SWA
 const SWAP_STATUS = {
   PENDING: 'pending',
   QUOTE_OBTAINED: 'quote_obtained',
+  WRAPPING: 'wrapping',
+  APPROVING: 'approving',
   EXECUTING: 'executing',
   COMPLETED: 'completed',
   FAILED: 'failed'
@@ -32,8 +34,7 @@ const FEE_TIERS = {
 };
 
 /**
- * ✅ SIMPLIFIED Swap Executor Service
- * Following the guide - let Alchemy handle ALL gas logic!
+ * ✅ FIXED Swap Executor Service - SPLIT TRANSACTIONS
  */
 class SwapExecutorService {
   constructor() {
@@ -55,7 +56,7 @@ class SwapExecutorService {
   }
 
   /**
-   * Execute a single token swap - SIMPLIFIED!
+   * Execute a single token swap - FIXED WITH SPLIT TRANSACTIONS!
    */
   async executeSwap(swapParams, options = {}) {
     if (!this.initialized) {
@@ -108,8 +109,6 @@ class SwapExecutorService {
       }
 
       // Execute swap
-      swap.status = SWAP_STATUS.EXECUTING;
-      
       const executionResult = await this.performSwap(swap);
       
       if (executionResult.success) {
@@ -286,114 +285,67 @@ class SwapExecutorService {
   }
 
   /**
-   * ✅ FIXED performSwap - SIMPLIFIED using Alchemy like the guide!
+   * ✅ FIXED performSwap - SPLIT INTO 3 SEPARATE TRANSACTIONS!
    */
   async performSwap(swap) {
     try {
       const { params, quote } = swap;
 
+      // ✅ CRITICAL VALIDATION
       if (!params.smartAccount || !params.smartAccount.account) {
         throw new Error("Smart account object is required");
       }
-
-      console.log('🔧 Smart Account:', params.smartAccount.address);
-
-      // Build transaction calls
-      const calls = [];
-      const isNativeMON = !params.tokenIn || params.tokenIn === null || String(params.tokenIn).toLowerCase() === 'mon';
-
-      if (isNativeMON) {
-        console.log('⚡ Native MON → wrapping, approving, swapping');
+      // ✅ CRITICAL FIX: Attach signer (walletClient) to account if missing
+      if (!params.smartAccount.account.walletClient && params.smartAccount.walletClient) {
+        console.log("🔧 Attaching walletClient to smart account...");
+        params.smartAccount.account.walletClient = params.smartAccount.walletClient;
         
-        // Wrap MON
-        calls.push({
-          to: CONTRACTS.WMON,
-          value: params.amountIn,
-          data: encodeFunctionData({
-            abi: [{ type: 'function', name: 'deposit', stateMutability: 'payable', inputs: [] }],
-            functionName: 'deposit'
-          })
-        });
-
-        // Approve WMON
-        calls.push({
-          to: CONTRACTS.WMON,
-          value: 0n,
-          data: encodeFunctionData({
-            abi: ERC20_ABI,
-            functionName: 'approve',
-            args: [CONTRACTS.SwapRouter02, params.amountIn * 2n]
-          })
-        });
-
-        // Swap
-        calls.push({
-          to: CONTRACTS.SwapRouter02,
-          value: 0n,
-          data: encodeFunctionData({
-            abi: SWAP_ROUTER_ABI,
-            functionName: 'exactInputSingle',
-            args: [{
-              tokenIn: CONTRACTS.WMON,
-              tokenOut: params.tokenOut,
-              fee: Number(quote.feeTier),
-              recipient: params.smartAccount.address,
-              deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
-              amountIn: params.amountIn,
-              amountOutMinimum: quote.minAmountOut,
-              sqrtPriceLimitX96: 0n
-            }]
-          })
-        });
-      } else {
-        console.log('🔓 ERC20 → approving and swapping');
-        
-        // Approve token
-        calls.push({
-          to: params.tokenIn,
-          value: 0n,
-          data: encodeFunctionData({
-            abi: ERC20_ABI,
-            functionName: 'approve',
-            args: [CONTRACTS.SwapRouter02, params.amountIn * 2n]
-          })
-        });
-
-        // Swap
-        calls.push({
-          to: CONTRACTS.SwapRouter02,
-          value: 0n,
-          data: encodeFunctionData({
-            abi: SWAP_ROUTER_ABI,
-            functionName: 'exactInputSingle',
-            args: [{
-              tokenIn: params.tokenIn,
-              tokenOut: params.tokenOut,
-              fee: Number(quote.feeTier),
-              recipient: params.smartAccount.address,
-              deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
-              amountIn: params.amountIn,
-              amountOutMinimum: quote.minAmountOut,
-              sqrtPriceLimitX96: 0n
-            }]
-          })
-        });
+      }
+      // ✅ Check again: does the account now have a signer?
+      const hasSigner =
+      !!params.smartAccount.walletClient ||
+      !!params.smartAccount.account.walletClient ||
+      typeof params.smartAccount.account.signUserOperation === 'function';
+      console.log("🔍 Signer Availability:", {
+        hasSigner,
+        hasWalletClient: !!params.smartAccount.walletClient,
+        accountWalletClient: !!params.smartAccount.account.walletClient
+      });
+      if (!hasSigner) {
+        throw new Error("❌ Smart account still has no signer! Make sure walletClient is passed down correctly.");
       }
 
-      console.log(`📦 Prepared ${calls.length} calls`);
+      // ✅ CRITICAL: Verify the account can sign
+      if (!params.smartAccount.account.signUserOperation) {
+        throw new Error("Smart account is missing signUserOperation function. The account may not be properly initialized with a signer.");
+      }
 
-      // ✅ SIMPLIFIED: Just use bundlerClient + paymasterClient like the guide!
-      const { createBundlerClient, createPaymasterClient } = await import('viem/account-abstraction');
-      const { http, createPublicClient } = await import('viem');
-      const { monadTestnet } = await import('../monad/monadClient.js');
-
-      const publicClient = createPublicClient({
-        chain: monadTestnet,
-        transport: http(monadTestnet.rpcUrls.default.http[0])
+      console.log('🔧 Smart Account:', params.smartAccount.address);
+      
+      // ✅ CRITICAL DEBUG: Check if account has signer
+      console.log('🔍 Account Debug:', {
+        hasAccount: !!params.smartAccount.account,
+        hasClient: !!params.smartAccount.account?.client,
+        hasSigner:
+        !!params.smartAccount.walletClient ||
+        !!params.smartAccount.account?.walletClient ||
+        typeof params.smartAccount.account?.signUserOperation === 'function',
+        hasSignUserOperation: typeof params.smartAccount.account?.signUserOperation === 'function',
+        accountType: params.smartAccount.account?.type
       });
 
+      // ✅ CRITICAL FIX: Don't create new clients - they lose the signer!
+      // The account object already has everything configured
+      const { createBundlerClient, createPaymasterClient } = await import('viem/account-abstraction');
+      const { http } = await import('viem');
+
+      // ✅ Use the account's existing client for balance/contract checks
+      const publicClient = params.smartAccount.account.client;
+
+      // ✅ Create bundler client - it will use the account's signer automatically
       const bundlerClient = createBundlerClient({
-        client: publicClient,
+        account: params.smartAccount.account,
+        client: publicClient, // Use the account's client that has the signer
         transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
       });
 
@@ -401,41 +353,164 @@ class SwapExecutorService {
         transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
       });
 
-      console.log('🚀 Sending UserOperation with Alchemy Gas Manager...');
+      const isNativeMON = !params.tokenIn || params.tokenIn === null || String(params.tokenIn).toLowerCase() === 'mon';
 
-      // ✅ THIS IS THE KEY - Just like the guide says!
-      const userOpHash = await bundlerClient.sendUserOperation({
+      // ✅ STEP 1: WRAP (if native MON)
+      if (isNativeMON) {
+        console.log('💰 Step 1/3: Wrapping MON...');
+        
+        // Check balance first
+        const balance = await publicClient.getBalance({ address: params.smartAccount.address });
+        console.log(`   Balance: ${formatUnits(balance, 18)} MON`);
+        
+        if (balance < params.amountIn) {
+          throw new Error(`Insufficient balance: ${formatUnits(balance, 18)} MON < ${formatUnits(params.amountIn, 18)} MON`);
+        }
+
+        const wrapCall = {
+          to: CONTRACTS.WMON,
+          value: params.amountIn,
+          data: encodeFunctionData({
+            abi: [{ type: 'function', name: 'deposit', stateMutability: 'payable', inputs: [], outputs: [] }],
+            functionName: 'deposit'
+          })
+        };
+        if (!params.smartAccount.account.signUserOperation) {
+          throw new Error("Smart account cannot sign UserOperations (missing signUserOperation).");
+        }        
+
+        const wrapHash = await bundlerClient.sendUserOperation({
+          account: params.smartAccount.account,
+          calls: [wrapCall],
+          paymaster: paymasterClient,
+          paymasterContext: {
+            policyId: ALCHEMY_CONFIG.POLICY_ID,
+          },
+        });
+
+        console.log(`   ✅ Wrap UserOp: ${wrapHash}`);
+
+        const wrapReceipt = await bundlerClient.waitForUserOperationReceipt({ hash: wrapHash });
+        
+        if (!wrapReceipt?.success) {
+          throw new Error('Wrap transaction failed');
+        }
+
+        console.log(`   ✅ Wrapped! TX: ${wrapReceipt.receipt.transactionHash}`);
+        
+        // Wait a bit for state to settle
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
+      // ✅ STEP 2: APPROVE
+      console.log('🔓 Step 2/3: Approving token...');
+      
+      const tokenToApprove = isNativeMON ? CONTRACTS.WMON : params.tokenIn;
+      
+      // Check current allowance
+      const currentAllowance = await publicClient.readContract({
+        address: tokenToApprove,
+        abi: ERC20_ABI,
+        functionName: 'allowance',
+        args: [params.smartAccount.address, CONTRACTS.SwapRouter02]
+      });
+
+      console.log(`   Current allowance: ${currentAllowance.toString()}`);
+
+      if (currentAllowance < params.amountIn) {
+        const approveCall = {
+          to: tokenToApprove,
+          value: 0n,
+          data: encodeFunctionData({
+            abi: ERC20_ABI,
+            functionName: 'approve',
+            args: [CONTRACTS.SwapRouter02, params.amountIn] // ✅ Exact amount, not 2x
+          })
+        };
+
+        const approveHash = await bundlerClient.sendUserOperation({
+          account: params.smartAccount.account,
+          calls: [approveCall],
+          paymaster: paymasterClient,
+          paymasterContext: {
+            policyId: ALCHEMY_CONFIG.POLICY_ID,
+          },
+        });
+
+        console.log(`   ✅ Approve UserOp: ${approveHash}`);
+
+        const approveReceipt = await bundlerClient.waitForUserOperationReceipt({ hash: approveHash });
+        
+        if (!approveReceipt?.success) {
+          throw new Error('Approve transaction failed');
+        }
+
+        console.log(`   ✅ Approved! TX: ${approveReceipt.receipt.transactionHash}`);
+        
+        // Wait a bit for state to settle
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } else {
+        console.log(`   ℹ️ Already approved, skipping`);
+      }
+
+      // ✅ STEP 3: SWAP
+      console.log('🔄 Step 3/3: Executing swap...');
+
+      const swapCall = {
+        to: CONTRACTS.SwapRouter02,
+        value: 0n,
+        data: encodeFunctionData({
+          abi: SWAP_ROUTER_ABI,
+          functionName: 'exactInputSingle',
+          args: [{
+            tokenIn: isNativeMON ? CONTRACTS.WMON : params.tokenIn,
+            tokenOut: params.tokenOut,
+            fee: Number(quote.feeTier),
+            recipient: params.smartAccount.address,
+            deadline: BigInt(Math.floor(Date.now() / 1000) + 300), // 5 minutes from now
+            amountIn: params.amountIn,
+            amountOutMinimum: quote.minAmountOut,
+            sqrtPriceLimitX96: 0n
+          }]
+        })
+      };
+
+      console.log('   Swap params:', {
+        tokenIn: isNativeMON ? CONTRACTS.WMON : params.tokenIn,
+        tokenOut: params.tokenOut,
+        fee: Number(quote.feeTier),
+        amountIn: params.amountIn.toString(),
+        minOut: quote.minAmountOut.toString()
+      });
+
+      const swapHash = await bundlerClient.sendUserOperation({
         account: params.smartAccount.account,
-        calls: calls,
+        calls: [swapCall],
         paymaster: paymasterClient,
         paymasterContext: {
           policyId: ALCHEMY_CONFIG.POLICY_ID,
         },
       });
 
-      console.log('✅ UserOpHash:', userOpHash);
+      console.log(`   ✅ Swap UserOp: ${swapHash}`);
 
-      // Wait for receipt
-      console.log('⏰ Waiting for confirmation...');
-      const receipt = await bundlerClient.waitForUserOperationReceipt({
-        hash: userOpHash
-      });
-
-      if (!receipt?.success) {
-        throw new Error('UserOperation failed');
+      const swapReceipt = await bundlerClient.waitForUserOperationReceipt({ hash: swapHash });
+      
+      if (!swapReceipt?.success) {
+        throw new Error('Swap transaction failed');
       }
 
-      console.log('✅ Swap successful! TX:', receipt.receipt.transactionHash);
+      console.log(`   ✅ Swap successful! TX: ${swapReceipt.receipt.transactionHash}`);
 
-      const swapResult = await this.parseSwapResult(receipt.receipt);
+      const swapResult = await this.parseSwapResult(swapReceipt.receipt);
 
       return {
         success: true,
         amountOut: swapResult.amountOut,
-        txHash: receipt.receipt.transactionHash,
-        gasUsed: receipt.receipt.gasUsed || 0n,
-        blockNumber: receipt.receipt.blockNumber,
-        userOpHash
+        txHash: swapReceipt.receipt.transactionHash,
+        gasUsed: swapReceipt.receipt.gasUsed || 0n,
+        blockNumber: swapReceipt.receipt.blockNumber,
+        userOpHash: swapHash
       };
 
     } catch (error) {
@@ -733,7 +808,7 @@ export {
   try {
     console.log('Initializing SwapExecutorService...');
     await swapExecutor.initialize();
-    console.log('✅ SwapExecutorService ready with Alchemy Gas Manager!');
+    console.log('✅ SwapExecutorService ready with SPLIT TRANSACTIONS!');
   } catch (error) {
     console.error('❌ Failed to initialize SwapExecutorService:', error);
   }

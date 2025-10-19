@@ -65,6 +65,8 @@ export class SmartAccountFactory {
           throw new Error('walletClient is required for JSON-RPC accounts');
         }
         console.log('📝 Using wallet client signer for JSON-RPC account');
+        // the 'signer' param supplied to toMetaMaskSmartAccount
+        // should include the walletClient for signing
         signerConfig = { walletClient };
       } else {
         console.log('🔑 Using local account signer');
@@ -97,6 +99,28 @@ export class SmartAccountFactory {
         createdAt: Date.now(),
         lastUsed: null,
       };
+
+      // --- CRITICAL FIX: Attach walletClient to enhancedAccount + underlying account
+      // This ensures downstream code (swapExecutor, bundlerClient, etc.) can
+      // detect and use the walletClient to trigger the wallet/sign popup.
+      if (walletClient) {
+        try {
+          enhancedAccount.walletClient = walletClient;
+          // attach to underlying toolkit account object (if it exists)
+          if (enhancedAccount.account) {
+            enhancedAccount.account.walletClient = walletClient;
+          }
+          // helpful debug flag
+          enhancedAccount.hasSigner = true;
+          console.log('🔗 walletClient attached to smart account (for signing).');
+        } catch (attachErr) {
+          console.warn('⚠️ Failed to attach walletClient to smart account object:', attachErr);
+          enhancedAccount.hasSigner = false;
+        }
+      } else {
+        // If created with local account signer, reflect that too
+        enhancedAccount.hasSigner = !!(eoaAccount && eoaAccount.privateKey) || false;
+      }
       
       this.accountCache.set(smartAccount.address.toLowerCase(), enhancedAccount);
       await this.checkDeploymentStatus(enhancedAccount);

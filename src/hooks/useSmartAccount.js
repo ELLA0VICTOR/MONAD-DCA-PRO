@@ -142,7 +142,18 @@ export function useSmartAccount() {
               account: recreated.account,
               ownerAccount: recreated.ownerAccount,
             };
-            
+            // ✅ Attach signer (walletClient) to account after rehydration
+            if (walletClient) {
+              fullAccount.walletClient = walletClient;
+              if (fullAccount.account) {
+                fullAccount.account.walletClient = walletClient;
+              }
+              fullAccount.hasSigner = true;
+            } else {
+              fullAccount.hasSigner = false;
+            }
+                        
+
             if (recreated.address.toLowerCase() === firstAccount.address.toLowerCase()) {
               console.log('✅ First account rehydrated');
             } else {
@@ -154,6 +165,18 @@ export function useSmartAccount() {
         }
         
         setActiveAccount(fullAccount);
+        console.log("✅ Active Smart Account:", {
+          address: fullAccount.address,
+          hasAccount: !!fullAccount.account,
+          hasWalletClient: !!fullAccount.walletClient,
+          hasSigner: !!(
+            fullAccount.walletClient || 
+            fullAccount.account?.signUserOperation || 
+            fullAccount.account?.signMessage
+          ),
+          accountMethods: Object.keys(fullAccount.account || {})
+        });
+        
         
         // Check deployment status
         const isDeployed = await checkDeployment(fullAccount.address);
@@ -502,7 +525,17 @@ export function useSmartAccount() {
         implementation: recreated.implementation,
         deploySalt: recreated.deploySalt
       };
-      
+      // ✅ Attach signer (walletClient) to rehydrated smart account
+      if (walletClient) {
+        fullAccount.walletClient = walletClient;
+        if (fullAccount.account) {
+          fullAccount.account.walletClient = walletClient;
+        }
+        fullAccount.hasSigner = true;
+      } else {
+        fullAccount.hasSigner = false;
+      }
+
       console.log('✅ Smart account rehydrated successfully');
       console.log('✅ Account object present:', !!fullAccount.account);
       

@@ -12,7 +12,7 @@ export class AlchemyBundlerClient {
     this.bundlerUrl = `https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`;
     this.publicClient = null;
     this.bundlerClient = null;
-    this.paymasterClient = null; // ✅ NOW WE CREATE THIS!
+    this.paymasterClient = null; 
 
     this.initializeClients();
   }
@@ -43,11 +43,6 @@ export class AlchemyBundlerClient {
       throw new Error(`Alchemy client initialization failed: ${error.message}`);
     }
   }
-
-  /**
-   * ✅ REMOVED: requestGasAndPaymasterData - WE DON'T NEED THIS!
-   * Alchemy handles it automatically when we use paymasterContext
-   */
 
   /**
    * Get bundler client for sending operations
