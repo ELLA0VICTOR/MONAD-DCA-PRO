@@ -4,17 +4,13 @@ import {
 } from '@metamask/delegation-toolkit';
 import { getAddress, keccak256, encodePacked } from 'viem';
 import { 
-  MONAD_CONFIG, 
+  ALCHEMY_CONFIG,
   SMART_ACCOUNT_CONFIG, 
-  CONTRACTS, 
-  GAS_LIMITS,
-  ALCHEMY_CONFIG 
+  CONTRACTS 
 } from '../../utils/constants.js';
 import { monadClient } from '../monad/monadClient.js';
-import { gasEstimator } from '../monad/gasEstimator.js';
 
-// ===== SMART ACCOUNT TYPES =====
-
+// Smart account types
 export const ACCOUNT_TYPES = {
   HYBRID: 'Hybrid',
   PASSKEY: 'Passkey',
@@ -28,13 +24,14 @@ export const DEPLOYMENT_STATE = {
   FAILED: 'failed'
 };
 
-// ===== SMART ACCOUNT FACTORY CLASS =====
-
+/**
+ * ✅ SIMPLIFIED Smart Account Factory
+ * Following the guide - deployment happens on first tx automatically!
+ */
 export class SmartAccountFactory {
   constructor(client = monadClient) {
     this.client = client;
     this.deployedAccounts = new Map();
-    this.pendingDeployments = new Map();
     this.accountCache = new Map();
     this.deploymentCache = new Map();
     
@@ -58,7 +55,6 @@ export class SmartAccountFactory {
       }
       
       console.log('🔧 Creating smart account with EOA:', eoaAccount.address);
-      console.log('🔧 Account type:', eoaAccount.type);
       
       const salt = deploySalt || this.generateDeterministicSalt(eoaAccount.address);
       
@@ -68,10 +64,8 @@ export class SmartAccountFactory {
         if (!walletClient) {
           throw new Error('walletClient is required for JSON-RPC accounts');
         }
-        
         console.log('📝 Using wallet client signer for JSON-RPC account');
         signerConfig = { walletClient };
-        
       } else {
         console.log('🔑 Using local account signer');
         signerConfig = { account: eoaAccount };
@@ -84,8 +78,6 @@ export class SmartAccountFactory {
         deploySalt: salt,
         signer: signerConfig
       };
-      
-      console.log('⚙️ Smart account config prepared');
       
       const smartAccount = await toMetaMaskSmartAccount(smartAccountConfig);
       
@@ -121,7 +113,8 @@ export class SmartAccountFactory {
   }
 
   /**
-   * ✅ Deploy using Alchemy Gas Manager (simplified - no sponsor signatures)
+   * ✅ SIMPLIFIED Deploy using Alchemy Gas Manager
+   * Just like the guide says - use bundlerClient.sendUserOperation!
    */
   async deploySmartAccount(smartAccount, firstTransaction = null) {
     if (!smartAccount || !smartAccount.account) {
@@ -135,33 +128,46 @@ export class SmartAccountFactory {
     }
 
     try {
-      console.log('🚀 [Deploy] Starting deployment via Alchemy bundler for:', smartAccount.address);
+      console.log('🚀 Starting deployment via Alchemy bundler for:', smartAccount.address);
 
       smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYING;
-      this.pendingDeployments.set(accountAddress, Date.now());
 
-      // ✅ Import Alchemy bundler
-      const { bundlerClient } = await import('../smartAccount/bundlerClient.js');
+      // ✅ Import clients
+      const { createBundlerClient, createPaymasterClient } = await import('viem/account-abstraction');
+      const { http, createPublicClient } = await import('viem');
+      const { monadTestnet } = await import('../monad/monadClient.js');
 
-      // Prepare minimal deployment call
+      // Prepare deployment call
       const call = firstTransaction || {
         to: smartAccount.address,
         data: '0x',
         value: 0n
       };
 
-      console.log('🔧 Step 1: Preparing user operation with Alchemy Gas Manager...');
+      console.log('🔧 Preparing user operation with Alchemy Gas Manager...');
 
-      // ✅ Create smart account client with Alchemy sponsorship
-      const smartAccountClient = await bundlerClient.createSmartAccountClient(smartAccount.account, {
-        sponsorUserOperation: true // Enable Alchemy Gas Manager
+      // ✅ Create clients
+      const publicClient = createPublicClient({
+        chain: monadTestnet,
+        transport: http(monadTestnet.rpcUrls.default.http[0])
       });
 
-      // ✅ Prepare and send the user operation with paymasterContext
+      const bundlerClient = createBundlerClient({
+        client: publicClient,
+        transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
+      });
+
+      const paymasterClient = createPaymasterClient({
+        transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
+      });
+
       console.log('📤 Sending user operation to Alchemy bundler...');
 
-      const userOpHash = await smartAccountClient.sendUserOperation({
+      // ✅ THIS IS THE KEY - Just like the guide!
+      const userOpHash = await bundlerClient.sendUserOperation({
+        account: smartAccount.account,
         calls: [call],
+        paymaster: paymasterClient,
         paymasterContext: {
           policyId: ALCHEMY_CONFIG.POLICY_ID
         }
@@ -169,10 +175,10 @@ export class SmartAccountFactory {
 
       console.log('✅ User operation submitted:', userOpHash);
 
-      // ✅ Wait for user operation receipt
+      // Wait for receipt
       console.log('⏳ Waiting for user operation receipt...');
 
-      const receipt = await smartAccountClient.waitForUserOperationReceipt({
+      const receipt = await bundlerClient.waitForUserOperationReceipt({
         hash: userOpHash
       });
 
@@ -183,17 +189,16 @@ export class SmartAccountFactory {
         throw new Error('User operation execution failed');
       }
 
-      // ✅ Extract transaction hash from receipt
+      // Extract transaction hash
       const txHash = receipt.receipt?.transactionHash || userOpHash;
 
-      // ✅ Update deployment metadata
+      // Update deployment metadata
       smartAccount.deploymentTxHash = txHash;
       smartAccount.deploymentState = DEPLOYMENT_STATE.DEPLOYED;
 
-      // ✅ Cache + store for persistence
+      // Cache + store
       this.deployedAccounts.set(accountAddress, smartAccount);
       this.storeAccountForEOA(smartAccount.owner, smartAccount);
-      this.pendingDeployments.delete(accountAddress);
 
       console.log(`✅ Smart account deployed via Alchemy: ${smartAccount.address}`);
       console.log(`✅ Transaction hash: ${txHash}`);
@@ -202,14 +207,8 @@ export class SmartAccountFactory {
       
     } catch (error) {
       console.error('❌ Smart account deployment failed:', error);
-      console.error('Error details:', {
-        message: error.message,
-        cause: error.cause,
-        stack: error.stack?.split('\n').slice(0, 3)
-      });
       
       smartAccount.deploymentState = DEPLOYMENT_STATE.FAILED;
-      this.pendingDeployments.delete(accountAddress);
       throw new Error(`Smart account deployment failed: ${error.message}`);
     }
   }
@@ -333,64 +332,6 @@ export class SmartAccountFactory {
     return keccak256(data);
   }
 
-  async getOptimalGasParams() {
-    try {
-      const gasEstimate = await gasEstimator.estimateOperationGas('ACCOUNT_DEPLOYMENT');
-      
-      return {
-        gas: BigInt(gasEstimate.standard.gasLimit),
-        gasPrice: BigInt(gasEstimate.standard.gasPrice || MONAD_CONFIG.baseFee),
-      };
-      
-    } catch (error) {
-      console.warn('⚠️ Gas estimation failed, falling back to defaults:', error.message);
-      return {
-        gas: BigInt(GAS_LIMITS.accountDeployment),
-        gasPrice: MONAD_CONFIG.baseFee,
-      };
-    }
-  }
-
-  async waitForDeployment(accountAddress, timeout = 60000) {
-    const startTime = Date.now();
-    const pollInterval = 2000;
-    
-    return new Promise((resolve, reject) => {
-      const checkDeployment = async () => {
-        try {
-          const account = this.getSmartAccount(accountAddress);
-          
-          if (!account) {
-            reject(new Error('Account not found'));
-            return;
-          }
-          
-          if (account.deploymentState === DEPLOYMENT_STATE.DEPLOYED) {
-            resolve(account.deploymentTxHash);
-            return;
-          }
-          
-          if (account.deploymentState === DEPLOYMENT_STATE.FAILED) {
-            reject(new Error('Deployment failed'));
-            return;
-          }
-          
-          if (Date.now() - startTime > timeout) {
-            reject(new Error('Deployment timeout'));
-            return;
-          }
-          
-          setTimeout(checkDeployment, pollInterval);
-          
-        } catch (error) {
-          reject(error);
-        }
-      };
-      
-      checkDeployment();
-    });
-  }
-
   async checkAccountDeployment(address) {
     if (!address) return false;
 
@@ -412,7 +353,7 @@ export class SmartAccountFactory {
       this.deploymentCache.set(address, { data: deployed, timestamp: Date.now() });
       return deployed;
     } catch (error) {
-      console.warn(`[SmartAccountFactory] checkAccountDeployment failed for ${address}:`, error);
+      console.warn(`checkAccountDeployment failed for ${address}:`, error);
       return cached?.data || false;
     } finally {
       this.deploymentLocks.delete(address);
@@ -422,35 +363,12 @@ export class SmartAccountFactory {
   listAccounts() {
     return Array.from(this.accountCache.values());
   }
-
-  cleanup() {
-    const now = Date.now();
-    const maxAge = 86400000; // 24 hours
-    
-    for (const [address, account] of this.accountCache.entries()) {
-      if (now - account.createdAt > maxAge && !account.lastUsed) {
-        this.accountCache.delete(address);
-      }
-    }
-    
-    for (const [address, timestamp] of this.pendingDeployments.entries()) {
-      if (now - timestamp > 300000) { // 5 minutes
-        this.pendingDeployments.delete(address);
-        const account = this.getSmartAccount(address);
-        if (account) {
-          account.deploymentState = DEPLOYMENT_STATE.FAILED;
-        }
-      }
-    }
-  }
 }
 
-// ===== SINGLETON INSTANCE =====
-
+// Singleton instance
 export const smartAccountFactory = new SmartAccountFactory();
 
-// ===== UTILITY FUNCTIONS =====
-
+// Utility functions
 export const createNewSmartAccount = async (eoaAccount, walletClient, options = {}) => {
   return await smartAccountFactory.createSmartAccount(eoaAccount, walletClient, {
     implementation: ACCOUNT_TYPES.HYBRID,
@@ -466,7 +384,6 @@ export const loadSmartAccountsForEOA = (eoaAddress) => {
   return smartAccountFactory.loadAccountsForEOA(eoaAddress);
 };
 
-// ===== EXPORTS =====
 export default {
   SmartAccountFactory,
   smartAccountFactory,

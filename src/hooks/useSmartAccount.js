@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { formatUnits } from 'viem';
 import toast from 'react-hot-toast';
-import { bundlerClient } from '../services/smartAccount/bundlerClient';
 
 // Services
 import { 
@@ -128,24 +127,19 @@ export function useSmartAccount() {
           console.log('🔄 Rehydrating first smart account...');
           
           try {
-             // 🧩 Step 1: Recreate the smart account instance properly
-             const recreated = await smartAccountFactory.createSmartAccount(
+            // Recreate the smart account instance properly
+            const recreated = await smartAccountFactory.createSmartAccount(
               walletClient.account,
               walletClient,
               {
-                deploySalt: firstAccount.deploySalt, // if available
+                deploySalt: firstAccount.deploySalt,
               }
             );
-            // 🧩 Step 2: Create the client using bundlerClient
-            const smartAccountClient = bundlerClient.createSmartAccountClient(recreated.account, {
-              sponsorUserOperation: true,
-            });
-              
-            // Attach the fully functional client
+            
+            // ✅ Attach the account object
             fullAccount = {
               ...firstAccount,
               account: recreated.account,
-              client: smartAccountClient, // <— new field
               ownerAccount: recreated.ownerAccount,
             };
             
@@ -342,13 +336,13 @@ export function useSmartAccount() {
       setStatus(ACCOUNT_STATUS.DEPLOYING);
 
       try {
-        const receipt = await smartAccountFactory.deploySmartAccount(account);
+        const txHash = await smartAccountFactory.deploySmartAccount(account);
         
-        console.log('✅ Smart account deployed:', receipt.transactionHash);
+        console.log('✅ Smart account deployed:', txHash);
         
         // Update account with deployment info
         account.deploymentState = 'deployed';
-        account.deploymentTxHash = receipt.transactionHash;
+        account.deploymentTxHash = txHash;
         
         setStatus(ACCOUNT_STATUS.DEPLOYED);
         
@@ -466,7 +460,7 @@ export function useSmartAccount() {
   }, [activeAccount, walletClient, loadAccountsForEOA, fetchBalances]);
 
   /**
-   * Switch active account
+   * ✅ FIXED: Switch active account (properly rehydrate account object)
    */
   const switchAccount = useCallback(async (accountAddress) => {
     const storedAccount = smartAccounts.find(acc => acc.address === accountAddress);
@@ -479,50 +473,38 @@ export function useSmartAccount() {
     try {
       setIsLoading(true);
       
-      // ✅ CRITICAL: If account object is missing, recreate it
-      let fullAccount = storedAccount;
+      // ✅ ALWAYS recreate the account object when switching
+      console.log('🔄 Rehydrating smart account instance for:', accountAddress);
       
-      if (!storedAccount.account) {
-        console.log('🔄 Rehydrating smart account instance for:', accountAddress);
-        
-        if (!walletClient?.account) {
-          throw new Error('Wallet client not available');
-        }
-        
-        // Recreate the smart account instance
-        const recreated = await smartAccountFactory.createSmartAccount(
-          walletClient.account,
-          walletClient,
-          {
-            deploySalt: storedAccount.deploySalt
-          }
-        );
-        // ✅ ADD CLIENT CREATION
-        const smartAccountClient = bundlerClient.createSmartAccountClient(recreated.account, {
-          sponsorUserOperation: true
-        });
-        
-        fullAccount = {
-          ...storedAccount,
-          account: recreated.account,
-          client: smartAccountClient, // ✅ ADD THIS
-          ownerAccount: recreated.ownerAccount
-        };
-
-        
-        // Verify address matches
-        if (recreated.address.toLowerCase() !== accountAddress.toLowerCase()) {
-          throw new Error('Address mismatch during rehydration');
-        }
-        
-        fullAccount = {
-          ...storedAccount,
-          account: recreated.account,
-          ownerAccount: recreated.ownerAccount
-        };
-        
-        console.log('✅ Smart account rehydrated successfully');
+      if (!walletClient?.account) {
+        throw new Error('Wallet client not available');
       }
+      
+      // Recreate the smart account instance
+      const recreated = await smartAccountFactory.createSmartAccount(
+        walletClient.account,
+        walletClient,
+        {
+          deploySalt: storedAccount.deploySalt
+        }
+      );
+      
+      // Verify address matches
+      if (recreated.address.toLowerCase() !== accountAddress.toLowerCase()) {
+        throw new Error('Address mismatch during rehydration');
+      }
+      
+      // ✅ Build full account with account object
+      const fullAccount = {
+        ...storedAccount,
+        account: recreated.account,
+        ownerAccount: recreated.ownerAccount,
+        implementation: recreated.implementation,
+        deploySalt: recreated.deploySalt
+      };
+      
+      console.log('✅ Smart account rehydrated successfully');
+      console.log('✅ Account object present:', !!fullAccount.account);
       
       setActiveAccount(fullAccount);
       

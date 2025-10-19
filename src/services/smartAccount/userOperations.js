@@ -1,54 +1,37 @@
 import { encodeFunctionData, parseAbi, formatUnits, parseUnits } from 'viem';
 import { monadClient } from '../monad/monadClient.js';
-import { gasEstimator } from '../monad/gasEstimator.js';
 import { bundlerClient } from './bundlerClient.js';
-import { CONTRACTS, GAS_LIMITS, MONAD_CONFIG } from '../../utils/constants.js';
-import { validateUserOperation, validateAddress, validateTokenAmount } from '../../utils/validators.js';
-import { formatTokenAmount } from '../../utils/formatters.js';
-import { Await } from 'react-router-dom';
-import { call } from 'viem/actions';
+import { CONTRACTS, ALCHEMY_CONFIG } from '../../utils/constants.js';
+import { validateAddress, validateTokenAmount } from '../../utils/validators.js';
 
-/**
- * Execution status for UserOperations
- */
+// Execution status
 export const EXECUTION_STATUS = {
   PENDING: 'pending',
   SUBMITTED: 'submitted',
   CONFIRMED: 'confirmed',
   FAILED: 'failed',
-  REVERTED: 'reverted',
-  TIMEOUT: 'timeout'
+  REVERTED: 'reverted'
 };
 
-/**
- * Operation types for tracking and gas estimation
- */
+// Operation types
 export const OPERATION_TYPES = {
   TOKEN_TRANSFER: 'token_transfer',
   TOKEN_APPROVAL: 'token_approval',
   UNISWAP_SWAP: 'uniswap_swap',
-  DCA_EXECUTION: 'dca_execution',
-  DELEGATION_CREATION: 'delegation_creation',
-  DELEGATION_REDEMPTION: 'delegation_redemption',
   BATCH_OPERATIONS: 'batch_operations'
 };
 
 /**
- * UserOperations service for Smart Accounts on Monad via Fastlane shBundler
- * Handles creation, execution, and monitoring of ERC-4337 operations
+ * ✅ SIMPLIFIED UserOperations Service
+ * Following the guide - let Alchemy handle everything!
  */
 class UserOperationsService {
   constructor() {
     this.activeOperations = new Map();
     this.operationHistory = [];
-    this.retryAttempts = new Map();
-    this.maxRetries = 3;
     this.initialized = false;
   }
 
-  /**
-   * Initialize the service with required clients
-   */
   async initialize() {
     if (this.initialized) return;
 
@@ -56,7 +39,7 @@ class UserOperationsService {
       await monadClient.initialize();
       await bundlerClient.healthCheck();
       this.initialized = true;
-      console.log('✅ UserOperations service initialized with Fastlane shBundler');
+      console.log('✅ UserOperations service initialized');
     } catch (error) {
       console.error('❌ Failed to initialize UserOperations service:', error);
       throw new Error(`UserOperations initialization failed: ${error.message}`);
@@ -72,7 +55,6 @@ class UserOperationsService {
     validateAddress(account.address, 'Smart account address');
     validateAddress(to, 'Recipient address');
     validateAddress(token, 'Token contract address');
-    validateTokenAmount(amount, 'Transfer amount');
 
     try {
       const tokenContract = {
@@ -97,18 +79,12 @@ class UserOperationsService {
         args: [to, parsedAmount]
       };
 
-      const smartAccountClient = bundlerClient.createSmartAccountClient(account, {
-        sponsorUserOperation: true // ✅ Fastlane shMonad sponsorship
-      });
-
-      const userOp = await this.createUserOperationFromCalls({
-        smartAccountClient,
+      return {
+        account,
         calls: [call],
         operationType: OPERATION_TYPES.TOKEN_TRANSFER,
         gasOptions
-      });
-
-      return userOp;
+      };
     } catch (error) {
       console.error('Failed to create token transfer:', error);
       throw new Error(`Token transfer creation failed: ${error.message}`);
@@ -148,103 +124,18 @@ class UserOperationsService {
         args: [spender, parsedAmount]
       };
 
-      const smartAccountClient = bundlerClient.createSmartAccountClient(account, {
-        sponsorUserOperation: true // ✅ Fastlane shMonad sponsorship
-      });
-
-      const userOp = await this.createUserOperationFromCalls({
-        smartAccountClient,
+      return {
+        account,
         calls: [call],
         operationType: OPERATION_TYPES.TOKEN_APPROVAL,
         gasOptions
-      });
-
-      return userOp;
+      };
     } catch (error) {
       console.error('Failed to create token approval:', error);
       throw new Error(`Token approval creation failed: ${error.message}`);
     }
   }
 
-  /**
-   * Create a Uniswap swap UserOperation
-   */
-  async createUniswapSwap(params) {
-    const {
-      account,
-      tokenIn,
-      tokenOut,
-      amountIn,
-      amountOutMinimum,
-      recipient,
-      deadline,
-      gasOptions = {}
-    } = params;
-  
-    validateAddress(account.address, 'Smart account address');
-    validateAddress(tokenIn, 'Token in address');
-    validateAddress(tokenOut, 'Token out address');
-  
-    try {
-      const fee = 3000;
-  
-      const swapParams = {
-        tokenIn,
-        tokenOut,
-        fee: Number(fee),
-        recipient: recipient || account.address,
-        deadline: typeof deadline === 'bigint' ? deadline : BigInt(deadline || Math.floor(Date.now() / 1000) + 300),
-        amountIn: typeof amountIn === 'bigint' ? amountIn : BigInt(amountIn),
-        amountOutMinimum: typeof amountOutMinimum === 'bigint' ? amountOutMinimum : BigInt(amountOutMinimum),
-        sqrtPriceLimitX96: 0n
-      };
-  
-      console.log('🔍 Swap params types:', {
-        fee: typeof swapParams.fee,
-        deadline: typeof swapParams.deadline,
-        amountIn: typeof swapParams.amountIn,
-        amountOutMinimum: typeof swapParams.amountOutMinimum
-      });
-  
-      if (
-        typeof swapParams.fee !== 'number' ||
-        typeof swapParams.deadline !== 'bigint' ||
-        typeof swapParams.amountIn !== 'bigint' ||
-        typeof swapParams.amountOutMinimum !== 'bigint' ||
-        typeof swapParams.tokenIn !== 'string' ||
-        typeof swapParams.tokenOut !== 'string' ||
-        typeof swapParams.recipient !== 'string'
-      ) {
-        throw new Error('Swap params have incorrect types');
-      }
-  
-      const call = {
-        to: CONTRACTS.SwapRouter02,
-        abi: parseAbi([
-          'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountOut)'
-        ]),
-        functionName: 'exactInputSingle',
-        args: [swapParams]
-      };
-
-      const smartAccountClient = bundlerClient.createSmartAccountClient(account, {
-        sponsorUserOperation: true // ✅ Fastlane shMonad sponsorship
-      });
-
-      const userOp = await this.createUserOperationFromCalls({
-        smartAccountClient,
-        calls: [call],
-        operationType: OPERATION_TYPES.UNISWAP_SWAP,
-        gasOptions
-      });
-
-      return userOp;
-    } catch (error) {
-      console.error('Failed to create Uniswap swap:', error);
-      throw new Error(`Uniswap swap creation failed: ${error.message}`);
-    }
-  }
-  
   /**
    * Create a batch UserOperation for multiple calls
    */
@@ -257,189 +148,117 @@ class UserOperationsService {
       throw new Error('Calls must be a non-empty array');
     }
 
-    calls.forEach((call, index) => {
-      validateAddress(call.to, `Call ${index} target address`);
-      if (call.data && typeof call.data !== 'string') {
-        throw new Error(`Call ${index} data must be a hex string`);
-      }
-      if (call.value !== undefined && typeof call.value !== 'bigint') {
-        throw new Error(`Call ${index} value must be a bigint`);
-      }
-    });
-
-    try {
-      const smartAccountClient = bundlerClient.createSmartAccountClient(account, {
-        sponsorUserOperation: true // ✅ Fastlane shMonad sponsorship
-      });
-
-      const userOp = await this.createUserOperationFromCalls({
-        smartAccountClient,
-        calls,
-        operationType,
-        gasOptions
-      });
-
-      return userOp;
-    } catch (error) {
-      console.error('Failed to create batch operation:', error);
-      throw new Error(`Batch operation creation failed: ${error.message}`);
-    }
+    return {
+      account,
+      calls,
+      operationType,
+      gasOptions
+    };
   }
 
   /**
-   * Core UserOperation creation using smart account client
-   */
-  async createUserOperationFromCalls(params) {
-    const { smartAccountClient, calls, operationType, gasOptions = {} } = params;
-   
-
-    try {
-      const gasPrice = await bundlerClient.getUserOperationGasPrice();
-  
-      const gasPricing = gasOptions.priorityLevel === 'fast' ? gasPrice.fast :
-                        gasOptions.priorityLevel === 'slow' ? gasPrice.slow :
-                        gasPrice.standard;
-
-      const txOptions = {
-        maxFeePerGas: gasOptions.maxFeePerGas || gasPricing.maxFeePerGas,
-        maxPriorityFeePerGas: gasOptions.maxPriorityFeePerGas || gasPricing.maxPriorityFeePerGas
-      };
-      // critical: estimate gas limits via bundlerClient
-      const gasEstimate = await bundlerClient.estimateUserOperationGas({
-        calls,
-        account: smartAccountClient.account
-      });
-
-      const estimatedCost = await this.calculateOperationCostEstimate(gasPricing);
-
-      return {
-        smartAccountClient,
-        calls,
-        txOptions,
-        operationType,
-        estimatedCost,
-        timestamp: Date.now(),
-        callGasLimit: gasEstimate.callGasLimit,
-        verificationGasLimit: gasEstimate.verificationGasLimit,
-        preVerificationGas: gasEstimate.preVerificationGas,
-        maxFeePerGas: txOptions.maxFeePerGas,
-        maxPriorityFeePerGas: txOptions.maxPriorityFeePerGas,
-      };
-
-    } catch (error) {
-      console.error('Failed to create UserOperation from calls:', error);
-      throw new Error(`UserOperation creation failed: ${error.message}`);
-    }
-  }
-
-  /**
-   * Execute a UserOperation with retry logic and monitoring
+   * ✅ SIMPLIFIED Execute - Just use bundlerClient + paymasterClient!
    */
   async executeUserOperation(userOp, options = {}) {
-    const { timeout = 60000, retryOnFailure = true, waitForConfirmation = true } = options;
+    const { timeout = 60000, waitForConfirmation = true } = options;
     const operationId = this.generateOperationId();
     
     try {
-      let smartAccountClient, calls, txOptions;
-  
-      if (userOp.smartAccountClient) {
-        smartAccountClient = userOp.smartAccountClient;
-        calls = userOp.calls;
-        txOptions = userOp.txOptions || {};
-      } else if (userOp.client && typeof userOp.client.sendTransaction === 'function') {
-        smartAccountClient = userOp.client;
-        calls = userOp.calls || [];
-        txOptions = userOp.txOptions || {};
-      } else if (userOp.account && typeof userOp.account.encodeCalls === 'function') {
-        smartAccountClient = userOp;
-        calls = userOp.calls || [];
-        txOptions = userOp.txOptions || {};
-      } else {
-        throw new Error('Invalid UserOperation format - missing smartAccountClient, client, or account');
+      // Extract account and calls
+      const account = userOp.account || userOp.smartAccount?.account;
+      const calls = userOp.calls || [];
+
+      if (!account) {
+        throw new Error('Invalid UserOperation format - missing account');
       }
-  
-      if (typeof smartAccountClient.sendTransaction !== 'function') {
-        throw new Error('SmartAccountClient missing sendTransaction method');
-      }
-      if (!smartAccountClient.account) {
-        throw new Error('SmartAccountClient missing account property');
-      }
-  
-      console.log('🔍 Executing with Fastlane shBundler:', {
-        hasClient: !!smartAccountClient,
-        hasAccount: !!smartAccountClient.account,
-        accountAddress: smartAccountClient.account?.address,
-        callsCount: calls?.length
+
+      console.log('🔍 Executing UserOperation:', {
+        operationId,
+        accountAddress: account.address,
+        callsCount: calls.length
       });
-  
-      if (userOp.estimatedCost && !options.skipBalanceCheck) {
-        await this.validateSufficientBalance(
-          smartAccountClient.account.address,
-          userOp.estimatedCost
-        );
-      }
-  
+
       this.trackOperation(operationId, userOp, EXECUTION_STATUS.PENDING);
-      console.log(`⚡ Executing UserOperation ${operationId} via Fastlane...`);
-  
-      const txHash = await smartAccountClient.sendTransaction({
-        calls,
-        ...txOptions
+      console.log(`⚡ Executing UserOperation ${operationId}...`);
+
+      // ✅ Import clients
+      const { createBundlerClient, createPaymasterClient } = await import('viem/account-abstraction');
+      const { http, createPublicClient } = await import('viem');
+      const { monadTestnet } = await import('../monad/monadClient.js');
+
+      // ✅ Create clients
+      const publicClient = createPublicClient({
+        chain: monadTestnet,
+        transport: http(monadTestnet.rpcUrls.default.http[0])
       });
-  
+
+      const bundlerClient = createBundlerClient({
+        client: publicClient,
+        transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
+      });
+
+      const paymasterClient = createPaymasterClient({
+        transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
+      });
+
+      console.log('🚀 Sending UserOperation with Alchemy Gas Manager...');
+
+      // ✅ THIS IS THE KEY - Just like the guide!
+      const userOpHash = await bundlerClient.sendUserOperation({
+        account: account,
+        calls: calls,
+        paymaster: paymasterClient,
+        paymasterContext: {
+          policyId: ALCHEMY_CONFIG.POLICY_ID,
+        },
+      });
+
       this.updateOperationStatus(operationId, EXECUTION_STATUS.SUBMITTED, {
-        transactionHash: txHash
+        transactionHash: userOpHash
       });
-  
-      console.log(`✅ UserOperation submitted via Fastlane with tx hash: ${txHash}`);
-  
+
+      console.log(`✅ UserOperation submitted: ${userOpHash}`);
+
       if (!waitForConfirmation) {
         return {
           success: true,
           operationId,
-          transactionHash: txHash,
+          transactionHash: userOpHash,
           status: EXECUTION_STATUS.SUBMITTED
         };
       }
-  
+
+      // Wait for receipt
       const receipt = await Promise.race([
-        bundlerClient.publicClient.waitForTransactionReceipt({
-          hash: txHash,
-          timeout
-        }),
+        bundlerClient.waitForUserOperationReceipt({ hash: userOpHash }),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Operation timeout')), timeout)
         )
       ]);
-  
-      if (receipt.status === 'success') {
+
+      if (receipt.success) {
         this.updateOperationStatus(operationId, EXECUTION_STATUS.CONFIRMED, { receipt });
-        console.log(`✅ UserOperation confirmed via Fastlane: ${txHash}`);
+        console.log(`✅ UserOperation confirmed: ${userOpHash}`);
+        
         return {
           success: true,
           operationId,
-          transactionHash: txHash,
+          transactionHash: receipt.receipt.transactionHash,
           receipt,
           status: EXECUTION_STATUS.CONFIRMED,
-          gasUsed: receipt.gasUsed,
-          gasCost: receipt.gasUsed * (receipt.effectiveGasPrice || MONAD_CONFIG.baseFee),
-          txHash
+          gasUsed: receipt.receipt.gasUsed,
+          txHash: receipt.receipt.transactionHash
         };
       } else {
         this.updateOperationStatus(operationId, EXECUTION_STATUS.REVERTED, { receipt });
-        throw new Error(`UserOperation reverted in transaction: ${txHash}`);
+        throw new Error(`UserOperation reverted`);
       }
     } catch (error) {
       console.error(`❌ UserOperation ${operationId} failed:`, error);
-  
-      if (retryOnFailure && this.shouldRetry(operationId, error)) {
-        console.log(`🔄 Retrying UserOperation ${operationId} with Fastlane...`);
-        return await this.retryUserOperation(operationId, userOp, options);
-      }
-  
+
       const status = error.message.includes('timeout') ? EXECUTION_STATUS.TIMEOUT : EXECUTION_STATUS.FAILED;
       this.updateOperationStatus(operationId, status, { error: error.message });
-  
+
       return {
         success: false,
         error: error.message,
@@ -448,44 +267,9 @@ class UserOperationsService {
       };
     }
   }
-  
-  /**
-   * Retry failed UserOperation with exponential backoff
-   */
-  async retryUserOperation(operationId, userOp, options) {
-    const retryCount = this.retryAttempts.get(operationId) || 0;
-    
-    if (retryCount >= this.maxRetries) {
-      throw new Error(`Max retries (${this.maxRetries}) exceeded for operation ${operationId}`);
-    }
-
-    const delay = Math.pow(2, retryCount) * 1000;
-    await new Promise(resolve => setTimeout(resolve, delay));
-
-    this.retryAttempts.set(operationId, retryCount + 1);
-
-    try {
-      const newGasPrice = await bundlerClient.getUserOperationGasPrice();
-      
-      const updatedUserOp = {
-        ...userOp,
-        txOptions: {
-          ...userOp.txOptions,
-          maxFeePerGas: newGasPrice.fast.maxFeePerGas,
-          maxPriorityFeePerGas: newGasPrice.fast.maxPriorityFeePerGas
-        }
-      };
-
-      return await this.executeUserOperation(updatedUserOp, options);
-
-    } catch (error) {
-      console.error(`Retry ${retryCount + 1} failed for operation ${operationId}:`, error);
-      throw error;
-    }
-  }
 
   /**
-   * Get operation status and details
+   * Get operation status
    */
   getOperationStatus(operationId) {
     return this.activeOperations.get(operationId) || null;
@@ -505,87 +289,6 @@ class UserOperationsService {
     return this.operationHistory
       .slice(-limit)
       .sort((a, b) => b.timestamp - a.timestamp);
-  }
-
-  /**
-   * Calculate estimated cost of operation in MON
-   */
-  async calculateOperationCostEstimate(gasPrice) {
-    let estimatedGasLimit = BigInt(GAS_LIMITS.userOperation || 300000);
-    
-    try {
-      if (gasEstimator && gasEstimator.estimateGasLimit) {
-        estimatedGasLimit = await gasEstimator.estimateGasLimit();
-      }
-    } catch (error) {
-      console.warn('Gas estimation failed, using default:', error.message);
-    }
-    
-    const totalCost = gasPrice.maxFeePerGas * estimatedGasLimit;
-    
-    return {
-      gasLimit: estimatedGasLimit,
-      gasPrice: gasPrice.maxFeePerGas,
-      totalCostWei: totalCost,
-      totalCostMON: formatUnits(totalCost, 18),
-      breakdown: {
-        estimated: true,
-        maxFeePerGas: gasPrice.maxFeePerGas,
-        maxPriorityFeePerGas: gasPrice.maxPriorityFeePerGas
-      }
-    };
-  }
-
-  /**
-   * Check if account has sufficient balance for operation
-   */
-  async validateSufficientBalance(accountAddress, operationCost) {
-    try {
-      const balance = await monadClient.getBalance({ address: accountAddress });
-      const requiredBalance = BigInt(operationCost.totalCostWei);
-
-      if (balance < requiredBalance) {
-        throw new Error(
-          `Insufficient balance. Required: ${formatTokenAmount(requiredBalance, 18)} MON, ` +
-          `Available: ${formatTokenAmount(balance, 18)} MON`
-        );
-      }
-
-      return true;
-    } catch (error) {
-      console.error('Balance validation failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Create a simple direct transaction
-   */
-  async executeDirectTransaction(params) {
-    const { account, call, gasOptions = {} } = params;
-    
-    try {
-      const smartAccountClient = bundlerClient.createSmartAccountClient(account, {
-        sponsorUserOperation: true // ✅ Fastlane shMonad sponsorship
-      });
-
-      const gasPrice = await bundlerClient.getUserOperationGasPrice();
-      
-      const txHash = await smartAccountClient.sendTransaction({
-        calls: [call],
-        maxFeePerGas: gasOptions.maxFeePerGas || gasPrice.standard.maxFeePerGas,
-        maxPriorityFeePerGas: gasOptions.maxPriorityFeePerGas || gasPrice.standard.maxPriorityFeePerGas
-      });
-
-      const receipt = await bundlerClient.publicClient.waitForTransactionReceipt({ 
-        hash: txHash 
-      });
-
-      return { transactionHash: txHash, receipt };
-    } catch (error) {
-      console.error('Direct transaction failed:', error);
-      throw error;
-    }
   }
 
   // Private helper methods
@@ -613,43 +316,21 @@ class UserOperationsService {
     operation.status = status;
     operation.history.push({ status, timestamp: Date.now(), ...data });
 
-    if ([EXECUTION_STATUS.CONFIRMED, EXECUTION_STATUS.FAILED, EXECUTION_STATUS.REVERTED, EXECUTION_STATUS.TIMEOUT].includes(status)) {
+    if ([EXECUTION_STATUS.CONFIRMED, EXECUTION_STATUS.FAILED, EXECUTION_STATUS.REVERTED].includes(status)) {
       this.operationHistory.push(operation);
       this.activeOperations.delete(operationId);
-      this.retryAttempts.delete(operationId);
-    }
-  }
-
-  shouldRetry(operationId, error) {
-    const nonRetryableErrors = [
-      'insufficient balance',
-      'invalid signature',
-      'invalid nonce',
-      'execution reverted'
-    ];
-
-    const errorMessage = error.message.toLowerCase();
-    return !nonRetryableErrors.some(nonRetryable => errorMessage.includes(nonRetryable));
-  }
-
-  /**
-   * Cleanup old operations from history
-   */
-  cleanup(maxHistorySize = 1000) {
-    if (this.operationHistory.length > maxHistorySize) {
-      this.operationHistory = this.operationHistory.slice(-maxHistorySize);
     }
   }
 
   /**
-   * Health check for the service
+   * Health check
    */
   async healthCheck() {
     try {
       const checks = {
         initialized: this.initialized,
         monadClient: await monadClient.healthCheck(),
-        fastlaneBundler: await bundlerClient.healthCheck(),
+        alchemyBundler: await bundlerClient.healthCheck(),
         activeOperations: this.activeOperations.size,
         historySize: this.operationHistory.length
       };
@@ -666,6 +347,9 @@ class UserOperationsService {
   }
 }
 
+/**
+ * Helper function to send user operation
+ */
 export async function sendUserOperation(account, calls, options = {}) {
   try {
     await userOperationsService.initialize();
@@ -686,13 +370,11 @@ export async function sendUserOperation(account, calls, options = {}) {
   }
 }
 
-// Create and export singleton instance
+// Create and export singleton
 export const userOperationsService = new UserOperationsService();
 
 // Export helper functions
 export const createTokenTransfer = (params) => userOperationsService.createTokenTransfer(params);
 export const createTokenApproval = (params) => userOperationsService.createTokenApproval(params);
-export const createUniswapSwap = (params) => userOperationsService.createUniswapSwap(params);
 export const createBatchOperation = (params) => userOperationsService.createBatchOperation(params);
 export const executeUserOperation = (userOp, options) => userOperationsService.executeUserOperation(userOp, options);
-export const executeDirectTransaction = (params) => userOperationsService.executeDirectTransaction(params);

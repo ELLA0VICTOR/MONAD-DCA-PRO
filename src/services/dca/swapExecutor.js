@@ -1,106 +1,78 @@
 import { parseUnits, formatUnits, encodeFunctionData, decodeFunctionResult } from 'viem';
-import { monadClient, monadTestnet } from '../monad/monadClient.js';
-import { gasEstimator } from '../monad/gasEstimator.js';
-import { hexToBytes } from 'viem';
-import { userOperationsService } from '../smartAccount/userOperations.js';
-import { validateTokenAmount, validateSlippage, validateAddress } from '../../utils/validators.js';
-import { formatTokenAmount, formatPrice, formatPercentage } from '../../utils/formatters.js';
+import { monadClient } from '../monad/monadClient.js';
+import { validateTokenAmount, validateAddress } from '../../utils/validators.js';
+import { formatTokenAmount } from '../../utils/formatters.js';
 import { 
   CONTRACTS, 
   SUPPORTED_TOKENS, 
   ALCHEMY_CONFIG,
-  MONAD_CONFIG,
   DCA_CONFIG 
 } from '../../utils/constants.js';
 import { keccak256, decodeEventLog } from 'viem';
 import UniswapV3PoolABI from '../../contracts/abis/UniswapV3Pool.json';
 import ERC20_ABI from '../../contracts/abis/ERC20.json';
 import SWAP_ROUTER_JSON from '../../contracts/abis/SwapRouter02.json';
-import { smartAccountActions } from 'permissionless';
-import { call } from 'viem/actions';
 
 const SWAP_ROUTER_ABI = Array.isArray(SWAP_ROUTER_JSON) ? SWAP_ROUTER_JSON : SWAP_ROUTER_JSON.abi;
-
-function safeBase64Encode(str) {
-  try {
-    if (typeof Buffer !== 'undefined') {
-      return Buffer.from(str, 'utf-8').toString('base64');
-    } else if (typeof btoa !== 'undefined') {
-      return btoa(String.fromCharCode(...new TextEncoder().encode(str)));
-    } else {
-      throw new Error('No base64 encoder available');
-    }
-  } catch (e) {
-    return `${Date.now()}${Math.floor(Math.random() * 1e9)}`;
-  }
-}
 
 // Swap execution status
 const SWAP_STATUS = {
   PENDING: 'pending',
   QUOTE_OBTAINED: 'quote_obtained',
-  APPROVED: 'approved',
   EXECUTING: 'executing',
   COMPLETED: 'completed',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled'
+  FAILED: 'failed'
 };
 
 // Fee tiers for Uniswap V3 pools
 const FEE_TIERS = {
-  LOW: 500,      // 0.05%
-  MEDIUM: 3000,  // 0.3%
-  HIGH: 10000    // 1%
+  LOW: 500,
+  MEDIUM: 3000,
+  HIGH: 10000
 };
 
 /**
- * Swap Executor Service
- * Handles token swaps on Uniswap V3 with Alchemy Gas Manager sponsorship
+ * ✅ SIMPLIFIED Swap Executor Service
+ * Following the guide - let Alchemy handle ALL gas logic!
  */
 class SwapExecutorService {
   constructor() {
     this.activeSwaps = new Map();
     this.swapHistory = new Map();
-    this.gasEstimateCache = new Map();
     this.initialized = false;
   }
 
-  /**
-   * Initialize the swap executor
-   */
   async initialize() {
     if (this.initialized) return;
-
     try {
       await this.validateContracts();
       this.initialized = true;
-      console.log('SwapExecutorService initialized (Alchemy Gas Manager)');
+      console.log('✅ SwapExecutorService initialized');
     } catch (error) {
-      console.error('Failed to initialize SwapExecutorService:', error);
+      console.error('❌ Failed to initialize SwapExecutorService:', error);
       throw new Error(`Swap executor initialization failed: ${error.message}`);
     }
   }
 
   /**
-   * Execute a single token swap
+   * Execute a single token swap - SIMPLIFIED!
    */
   async executeSwap(swapParams, options = {}) {
     if (!this.initialized) {
       throw new Error('Swap executor not initialized');
     }
-  
+
     const validation = this.validateSwapParams(swapParams);
     if (!validation.isValid) {
       throw new Error(`Invalid swap parameters: ${validation.errors.join(', ')}`);
     }
-  
+
     const {
       skipQuote = false,
       maxSlippage = DCA_CONFIG.DEFAULT_SLIPPAGE,
-      deadline = Math.floor(Date.now() / 1000) + 300, // 5 minutes
-      enableGasOptimization = true
+      deadline = Math.floor(Date.now() / 1000) + 300
     } = options;
-  
+
     const swapId = this.generateSwapId(swapParams);
     
     try {
@@ -114,17 +86,15 @@ class SwapExecutorService {
         quote: null,
         actualOutput: 0n,
         gasUsed: 0n,
-        gasCost: 0n,
-        slippage: 0,
         txHash: null,
         error: null
       };
-  
+
       this.activeSwaps.set(swapId, swap);
-  
+
       console.log(`Starting swap ${swapId}: ${formatTokenAmount(swapParams.amountIn, swapParams.tokenInDecimals)} ${swapParams.tokenInSymbol} → ${swapParams.tokenOutSymbol}`);
-  
-      // Step 1: Get quote
+
+      // Get quote
       if (!skipQuote) {
         const quoteResult = await this.getSwapQuote(swapParams, { maxSlippage, deadline });
         if (!quoteResult.success) {
@@ -136,23 +106,20 @@ class SwapExecutorService {
         
         console.log(`Quote obtained: ${formatTokenAmount(swap.quote.amountOut, swapParams.tokenOutDecimals)} ${swapParams.tokenOutSymbol}`);
       }
-  
-      // Step 2: Execute swap (NO RETRY)
+
+      // Execute swap
       swap.status = SWAP_STATUS.EXECUTING;
       
-      const executionResult = await this.performSwap(swap, enableGasOptimization);
+      const executionResult = await this.performSwap(swap);
       
       if (executionResult.success) {
         swap.status = SWAP_STATUS.COMPLETED;
         swap.actualOutput = executionResult.amountOut;
         swap.txHash = executionResult.txHash;
         swap.gasUsed = executionResult.gasUsed;
-        swap.gasCost = executionResult.gasCost;
-        swap.slippage = this.calculateActualSlippage(swap);
         swap.completedAt = Date.now();
-  
-        console.log(`Swap ${swapId} completed successfully`);
-        console.log(`Output: ${formatTokenAmount(swap.actualOutput, swapParams.tokenOutDecimals)} ${swapParams.tokenOutSymbol}`);
+
+        console.log(`✅ Swap ${swapId} completed successfully`);
         
         this.recordSwapHistory(swap);
         
@@ -163,8 +130,6 @@ class SwapExecutorService {
             amountOut: swap.actualOutput,
             txHash: swap.txHash,
             gasUsed: swap.gasUsed,
-            gasCost: swap.gasCost,
-            slippage: swap.slippage,
             executionTime: swap.completedAt - swap.startedAt
           }
         };
@@ -172,10 +137,9 @@ class SwapExecutorService {
         swap.status = SWAP_STATUS.FAILED;
         swap.error = executionResult.error;
         swap.completedAt = Date.now();
-  
         throw new Error(`Swap execution failed: ${executionResult.error}`);
       }
-  
+
     } catch (error) {
       console.error(`Swap execution ${swapId} failed:`, error);
       
@@ -186,23 +150,20 @@ class SwapExecutorService {
         swap.completedAt = Date.now();
         this.recordSwapHistory(swap);
       }
-  
+
       throw error;
     } finally {
       this.activeSwaps.delete(swapId);
     }
   }
+
   /**
- * Safe contract call wrapper
- */
+   * Safe contract call wrapper
+   */
   async safeCall({ to, data }) {
     try {
-      const result = await monadClient.publicClient.call({ 
-        to, 
-        data 
-      });
+      const result = await monadClient.publicClient.call({ to, data });
       
-      // Handle both string and Uint8Array responses
       if (result instanceof Uint8Array) {
         return { data: `0x${Array.from(result).map(b => b.toString(16).padStart(2, '0')).join('')}` };
       }
@@ -213,214 +174,96 @@ class SwapExecutorService {
       throw error;
     }
   }
-  
+
   /**
    * Get swap quote DIRECTLY from pool
    */
   async getSwapQuote(swapParams, options = {}) {
     const { maxSlippage = DCA_CONFIG.DEFAULT_SLIPPAGE } = options;
-  
+
     try {
-      // ✅ 1) Normalize tokens - convert null/native to WMON
+      // Normalize tokens
       const normalizeToken = (token) => {
-        // If it's null, undefined, or "MON" symbol → use WMON address
-        if (!token || 
-            token === null || 
-            token === undefined ||
-            String(token).toUpperCase() === 'MON' ||
-            token === '0x0000000000000000000000000000000000000000') {
+        if (!token || token === null || String(token).toUpperCase() === 'MON' || token === '0x0000000000000000000000000000000000000000') {
           console.log('🔄 Normalizing native MON → WMON for pool query');
           return CONTRACTS.WMON.toLowerCase();
         }
-        
         return String(token).toLowerCase();
       };
-  
+
       const tokenInAddress = normalizeToken(swapParams.tokenIn);
       const tokenOutAddress = normalizeToken(swapParams.tokenOut);
-  
-      // Validation
-      if (!tokenInAddress || !tokenOutAddress) {
+
+      if (!tokenInAddress || !tokenOutAddress || tokenInAddress === tokenOutAddress) {
         return { success: false, error: 'Invalid token addresses' };
       }
-  
-      if (tokenInAddress === tokenOutAddress) {
-        return { success: false, error: 'Cannot swap token to itself' };
-      }
-  
+
       if (!swapParams.amountIn || swapParams.amountIn === 0n) {
         return { success: false, error: 'Amount must be greater than zero' };
       }
-  
-      // ✅ 2) Find optimal pool
+
+      // Find optimal pool
       console.log(`📊 Finding pool for ${tokenInAddress} <-> ${tokenOutAddress}`);
       
-      let feeTier;
-      let poolAddress;
-      
-      try {
-        const poolData = await this.getOptimalFeeTierWithAddress(tokenInAddress, tokenOutAddress);
-        feeTier = poolData.fee;
-        poolAddress = poolData.poolAddress;
-      } catch (error) {
-        console.error('❌ No liquidity pool found:', error);
-        return {
-          success: false,
-          error: 'No liquidity available for this token pair'
-        };
-      }
-  
-      console.log(`📊 Getting quote for ${swapParams.amountIn.toString()} using fee tier ${feeTier}`);
-      console.log(`📊 Pool address: ${poolAddress}`);
-  
-      // ✅ 3) Get pool state
+      const poolData = await this.getOptimalFeeTierWithAddress(tokenInAddress, tokenOutAddress);
+      const feeTier = poolData.fee;
+      const poolAddress = poolData.poolAddress;
+
+      console.log(`📊 Using pool ${poolAddress} with fee ${feeTier}`);
+
+      // Get pool state
       const poolABI = [
-        {
-          inputs: [],
-          name: 'slot0',
-          outputs: [
-            { name: 'sqrtPriceX96', type: 'uint160' },
-            { name: 'tick', type: 'int24' },
-            { name: 'observationIndex', type: 'uint16' },
-            { name: 'observationCardinality', type: 'uint16' },
-            { name: 'observationCardinalityNext', type: 'uint16' },
-            { name: 'feeProtocol', type: 'uint8' },
-            { name: 'unlocked', type: 'bool' }
-          ],
-          stateMutability: 'view',
-          type: 'function'
-        },
-        {
-          inputs: [],
-          name: 'liquidity',
-          outputs: [{ name: '', type: 'uint128' }],
-          stateMutability: 'view',
-          type: 'function'
-        },
-        {
-          inputs: [],
-          name: 'token0',
-          outputs: [{ name: '', type: 'address' }],
-          stateMutability: 'view',
-          type: 'function'
-        },
-        {
-          inputs: [],
-          name: 'token1',
-          outputs: [{ name: '', type: 'address' }],
-          stateMutability: 'view',
-          type: 'function'
-        }
+        { inputs: [], name: 'slot0', outputs: [{ name: 'sqrtPriceX96', type: 'uint160' }, { name: 'tick', type: 'int24' }], stateMutability: 'view', type: 'function' },
+        { inputs: [], name: 'liquidity', outputs: [{ name: '', type: 'uint128' }], stateMutability: 'view', type: 'function' },
+        { inputs: [], name: 'token0', outputs: [{ name: '', type: 'address' }], stateMutability: 'view', type: 'function' },
+        { inputs: [], name: 'token1', outputs: [{ name: '', type: 'address' }], stateMutability: 'view', type: 'function' }
       ];
-  
-      // Get pool data
+
       const [slot0Result, liquidityResult, token0Result, token1Result] = await Promise.all([
-        this.safeCall({
-          to: poolAddress,
-          data: encodeFunctionData({
-            abi: poolABI,
-            functionName: 'slot0',
-            args: []
-          })
-        }),
-        this.safeCall({
-          to: poolAddress,
-          data: encodeFunctionData({
-            abi: poolABI,
-            functionName: 'liquidity',
-            args: []
-          })
-        }),
-        this.safeCall({
-          to: poolAddress,
-          data: encodeFunctionData({
-            abi: poolABI,
-            functionName: 'token0',
-            args: []
-          })
-        }),
-        this.safeCall({
-          to: poolAddress,
-          data: encodeFunctionData({
-            abi: poolABI,
-            functionName: 'token1',
-            args: []
-          })
-        })
+        this.safeCall({ to: poolAddress, data: encodeFunctionData({ abi: poolABI, functionName: 'slot0', args: [] }) }),
+        this.safeCall({ to: poolAddress, data: encodeFunctionData({ abi: poolABI, functionName: 'liquidity', args: [] }) }),
+        this.safeCall({ to: poolAddress, data: encodeFunctionData({ abi: poolABI, functionName: 'token0', args: [] }) }),
+        this.safeCall({ to: poolAddress, data: encodeFunctionData({ abi: poolABI, functionName: 'token1', args: [] }) })
       ]);
-  
-      const slot0Decoded = decodeFunctionResult({
-        abi: poolABI,
-        functionName: 'slot0',
-        data: slot0Result.data
-      });
+
+      const slot0Decoded = decodeFunctionResult({ abi: poolABI, functionName: 'slot0', data: slot0Result.data });
       const sqrtPriceX96 = Array.isArray(slot0Decoded) ? slot0Decoded[0] : slot0Decoded;
-  
-      const liquidityDecoded = decodeFunctionResult({
-        abi: poolABI,
-        functionName: 'liquidity',
-        data: liquidityResult.data
-      });
+
+      const liquidityDecoded = decodeFunctionResult({ abi: poolABI, functionName: 'liquidity', data: liquidityResult.data });
       const liquidity = Array.isArray(liquidityDecoded) ? liquidityDecoded[0] : liquidityDecoded;
-  
-      const token0Decoded = decodeFunctionResult({
-        abi: poolABI,
-        functionName: 'token0',
-        data: token0Result.data
-      });
+
+      const token0Decoded = decodeFunctionResult({ abi: poolABI, functionName: 'token0', data: token0Result.data });
       const token0Address = (Array.isArray(token0Decoded) ? token0Decoded[0] : token0Decoded).toLowerCase();
-  
-      const token1Decoded = decodeFunctionResult({
-        abi: poolABI,
-        functionName: 'token1',
-        data: token1Result.data
-      });
-      const token1Address = (Array.isArray(token1Decoded) ? token1Decoded[0] : token1Decoded).toLowerCase();
-  
+
       console.log(`📊 Pool state: sqrtPrice=${sqrtPriceX96}, liquidity=${liquidity}`);
-  
-      if (!sqrtPriceX96 || sqrtPriceX96 === 0n) {
-        return { success: false, error: 'Invalid pool price data' };
+
+      if (!sqrtPriceX96 || sqrtPriceX96 === 0n || !liquidity || liquidity === 0n) {
+        return { success: false, error: 'Invalid pool state' };
       }
-  
-      if (!liquidity || liquidity === 0n) {
-        return { success: false, error: 'Pool has no liquidity' };
-      }
-  
-      // ✅ 4) Calculate output amount
+
+      // Calculate output
       const isToken0In = tokenInAddress === token0Address;
-  
-      let amountOut;
-      try {
-        const Q96 = 2n ** 96n;
-        const priceSquared = (sqrtPriceX96 * sqrtPriceX96) / Q96;
-  
-        if (isToken0In) {
-          amountOut = (swapParams.amountIn * priceSquared) / Q96;
-        } else {
-          amountOut = (swapParams.amountIn * Q96) / priceSquared;
-        }
-  
-        // Apply fee
-        const feeBps = BigInt(feeTier);
-        const feeMultiplier = 1000000n - feeBps;
-        amountOut = (amountOut * feeMultiplier) / 1000000n;
-  
-        console.log(`📊 Calculated output (before slippage): ${amountOut.toString()}`);
-  
-      } catch (mathError) {
-        console.error('Math calculation error:', mathError);
-        return { success: false, error: 'Failed to calculate swap output' };
-      }
-  
+      const Q96 = 2n ** 96n;
+      const priceSquared = (sqrtPriceX96 * sqrtPriceX96) / Q96;
+
+      let amountOut = isToken0In 
+        ? (swapParams.amountIn * priceSquared) / Q96
+        : (swapParams.amountIn * Q96) / priceSquared;
+
+      // Apply fee
+      const feeBps = BigInt(feeTier);
+      amountOut = (amountOut * (1000000n - feeBps)) / 1000000n;
+
+      console.log(`📊 Calculated output: ${amountOut.toString()}`);
+
       if (!amountOut || amountOut === 0n) {
         return { success: false, error: 'Calculated quote returned zero output' };
       }
-  
-      // ✅ 5) Apply slippage
+
+      // Apply slippage
       const slippageBps = BigInt(Math.floor(maxSlippage * 10000));
       const minAmountOut = (amountOut * (10000n - slippageBps)) / 10000n;
-  
+
       const quote = {
         amountOut,
         minAmountOut,
@@ -428,56 +271,41 @@ class SwapExecutorService {
         poolAddress,
         sqrtPriceX96,
         liquidity,
-        gasEstimate: 200000,
         timestamp: Date.now(),
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress
       };
-  
+
       console.log(`✅ Quote success: ${amountOut.toString()} output (min: ${minAmountOut.toString()})`);
       return { success: true, quote };
-  
+
     } catch (error) {
       console.error('❌ Failed to get swap quote:', error);
-  
-      let errorMessage = 'Failed to get quote';
-      if (error.message?.includes('execution reverted')) {
-        errorMessage = 'Pool error - try different amount or pair';
-      } else if (error.message?.includes('RPC')) {
-        errorMessage = 'Network error - please try again';
-      } else if (error.message) {
-        errorMessage = error.message;
-      }
-  
-      return {
-        success: false,
-        error: errorMessage
-      };
+      return { success: false, error: error.message || 'Failed to get quote' };
     }
   }
+
   /**
-   *  FIXED performSwap using Alchemy Gas Manager
-   *  Following the exact flow from Alchemy docs
-   * */
-  async performSwap(swap, enableGasOptimization = true) {
+   * ✅ FIXED performSwap - SIMPLIFIED using Alchemy like the guide!
+   */
+  async performSwap(swap) {
     try {
       const { params, quote } = swap;
-  
+
       if (!params.smartAccount || !params.smartAccount.account) {
         throw new Error("Smart account object is required");
       }
-  
+
       console.log('🔧 Smart Account:', params.smartAccount.address);
-  
+
       // Build transaction calls
       const calls = [];
-      const isNativeMON = !params.tokenIn || 
-                          params.tokenIn === null || 
-                          String(params.tokenIn).toLowerCase() === 'mon';
-  
+      const isNativeMON = !params.tokenIn || params.tokenIn === null || String(params.tokenIn).toLowerCase() === 'mon';
+
       if (isNativeMON) {
         console.log('⚡ Native MON → wrapping, approving, swapping');
         
+        // Wrap MON
         calls.push({
           to: CONTRACTS.WMON,
           value: params.amountIn,
@@ -486,7 +314,8 @@ class SwapExecutorService {
             functionName: 'deposit'
           })
         });
-  
+
+        // Approve WMON
         calls.push({
           to: CONTRACTS.WMON,
           value: 0n,
@@ -496,7 +325,8 @@ class SwapExecutorService {
             args: [CONTRACTS.SwapRouter02, params.amountIn * 2n]
           })
         });
-  
+
+        // Swap
         calls.push({
           to: CONTRACTS.SwapRouter02,
           value: 0n,
@@ -518,6 +348,7 @@ class SwapExecutorService {
       } else {
         console.log('🔓 ERC20 → approving and swapping');
         
+        // Approve token
         calls.push({
           to: params.tokenIn,
           value: 0n,
@@ -527,7 +358,8 @@ class SwapExecutorService {
             args: [CONTRACTS.SwapRouter02, params.amountIn * 2n]
           })
         });
-  
+
+        // Swap
         calls.push({
           to: CONTRACTS.SwapRouter02,
           value: 0n,
@@ -547,135 +379,65 @@ class SwapExecutorService {
           })
         });
       }
-  
+
       console.log(`📦 Prepared ${calls.length} calls`);
-  
-      // ✅ Get account and encode callData
-      const account = params.smartAccount.account;
-      const nonce = await account.getNonce();
-      const callData = await account.encodeCalls(calls);
-  
-      console.log('📝 CallData length:', callData.length);
-      console.log('🔢 Nonce:', nonce);
-  
-      // ✅ Get dummy signature
-      const dummySignature = account.getDummySignature 
-        ? await account.getDummySignature()
-        : '0x' + '00'.repeat(65);
-  
-      // ✅ STEP 1: Call Alchemy Gas Manager API to get gas estimates + paymaster signature
-      console.log('💰 Calling Alchemy Gas Manager API...');
-      
-      const alchemyResponse = await fetch(
-        `https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'alchemy_requestGasAndPaymasterAndData',
-            params: [{
-              policyId: ALCHEMY_CONFIG.POLICY_ID,
-              entryPoint: '0x0000000071727De22E5E9d8BAf0edAc6f37da032', // EntryPoint v0.7
-              dummySignature: dummySignature,
-              userOperation: {
-                sender: params.smartAccount.address,
-                nonce: `0x${nonce.toString(16)}`,
-                callData: callData
-              }
-            }]
-          })
-        }
-      );
-  
-      const alchemyData = await alchemyResponse.json();
-  
-      if (alchemyData.error) {
-        console.error('❌ Alchemy Gas Manager error:', alchemyData.error);
-        throw new Error(`Gas Manager API error: ${alchemyData.error.message}`);
-      }
-  
-      console.log('✅ Alchemy Gas Manager response:', {
-        paymaster: alchemyData.result.paymaster,
-        callGasLimit: alchemyData.result.callGasLimit,
-        verificationGasLimit: alchemyData.result.verificationGasLimit
-      });
-  
-      // ✅ STEP 2: Use viem to send with Alchemy's gas values
-      const { createBundlerClient } = await import('viem/account-abstraction');
-      const { http } = await import('viem');
+
+      // ✅ SIMPLIFIED: Just use bundlerClient + paymasterClient like the guide!
+      const { createBundlerClient, createPaymasterClient } = await import('viem/account-abstraction');
+      const { http, createPublicClient } = await import('viem');
       const { monadTestnet } = await import('../monad/monadClient.js');
-      const { createPublicClient } = await import('viem');
-  
+
       const publicClient = createPublicClient({
         chain: monadTestnet,
         transport: http(monadTestnet.rpcUrls.default.http[0])
       });
-  
+
       const bundlerClient = createBundlerClient({
         client: publicClient,
         transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
-        chain: monadTestnet
       });
-  
-      console.log('🚀 Sending UserOperation with Alchemy gas values...');
-  
-      // Build UserOp with Alchemy's values
-      const userOp = {
-        sender: params.smartAccount.address,
-        nonce: nonce,
-        callData: callData,
-        callGasLimit: BigInt(alchemyData.result.callGasLimit),
-        verificationGasLimit: BigInt(alchemyData.result.verificationGasLimit),
-        preVerificationGas: BigInt(alchemyData.result.preVerificationGas),
-        maxFeePerGas: BigInt(alchemyData.result.maxFeePerGas),
-        maxPriorityFeePerGas: BigInt(alchemyData.result.maxPriorityFeePerGas),
-        paymaster: alchemyData.result.paymaster,
-        paymasterData: alchemyData.result.paymasterData || '0x',
-        paymasterVerificationGasLimit: BigInt(alchemyData.result.paymasterVerificationGasLimit || '0x0'),
-        paymasterPostOpGasLimit: BigInt(alchemyData.result.paymasterPostOpGasLimit || '0x0')
-      };
-  
-      // Sign the UserOp
-      const signature = await account.signUserOperation(userOp);
-      userOp.signature = signature;
-  
-      console.log('✅ UserOp signed, sending...');
-  
-      // Send via bundler
+
+      const paymasterClient = createPaymasterClient({
+        transport: http(`https://monad-testnet.g.alchemy.com/v2/${ALCHEMY_CONFIG.API_KEY}`),
+      });
+
+      console.log('🚀 Sending UserOperation with Alchemy Gas Manager...');
+
+      // ✅ THIS IS THE KEY - Just like the guide says!
       const userOpHash = await bundlerClient.sendUserOperation({
-        ...userOp,
-        account: account,
-        entryPoint: '0x0000000071727De22E5E9d8BAf0edAc6f37da032'
+        account: params.smartAccount.account,
+        calls: calls,
+        paymaster: paymasterClient,
+        paymasterContext: {
+          policyId: ALCHEMY_CONFIG.POLICY_ID,
+        },
       });
-  
+
       console.log('✅ UserOpHash:', userOpHash);
-  
+
       // Wait for receipt
       console.log('⏰ Waiting for confirmation...');
       const receipt = await bundlerClient.waitForUserOperationReceipt({
         hash: userOpHash
       });
-  
+
       if (!receipt?.success) {
         throw new Error('UserOperation failed');
       }
-  
+
       console.log('✅ Swap successful! TX:', receipt.receipt.transactionHash);
-  
+
       const swapResult = await this.parseSwapResult(receipt.receipt);
-  
+
       return {
         success: true,
         amountOut: swapResult.amountOut,
         txHash: receipt.receipt.transactionHash,
         gasUsed: receipt.receipt.gasUsed || 0n,
-        gasCost: 0n,
         blockNumber: receipt.receipt.blockNumber,
         userOpHash
       };
-  
+
     } catch (error) {
       console.error("❌ Swap failed:", error);
       return {
@@ -687,31 +449,23 @@ class SwapExecutorService {
   }
 
   /**
-   * Get optimal fee tier AND pool address for a token pair
+   * Get optimal fee tier AND pool address
    */
   async getOptimalFeeTierWithAddress(tokenA, tokenB) {
-    if (!tokenA || !tokenB) {
-      throw new Error('Missing token addresses');
+    if (!tokenA || !tokenB || tokenA.toLowerCase() === tokenB.toLowerCase()) {
+      throw new Error('Invalid token pair');
     }
-  
-    if (tokenA.toLowerCase() === tokenB.toLowerCase()) {
-      throw new Error('Cannot get pool for identical tokens');
-    }
-  
+
     const feeTiers = [FEE_TIERS.MEDIUM, FEE_TIERS.LOW, FEE_TIERS.HIGH];
     
     const factoryABI = [{
-      inputs: [
-        { name: 'tokenA', type: 'address' },
-        { name: 'tokenB', type: 'address' },
-        { name: 'fee', type: 'uint24' }
-      ],
+      inputs: [{ name: 'tokenA', type: 'address' }, { name: 'tokenB', type: 'address' }, { name: 'fee', type: 'uint24' }],
       name: 'getPool',
       outputs: [{ name: 'pool', type: 'address' }],
       stateMutability: 'view',
       type: 'function'
     }];
-  
+
     const poolABI = [{
       inputs: [],
       name: 'liquidity',
@@ -719,113 +473,59 @@ class SwapExecutorService {
       stateMutability: 'view',
       type: 'function'
     }];
-  
+
     console.log(`🔍 Finding optimal fee tier for ${tokenA} <-> ${tokenB}`);
-  
+
     const poolsFound = [];
-  
+
     for (const fee of feeTiers) {
       try {
-        const getPoolCalldata = encodeFunctionData({
-          abi: factoryABI,
-          functionName: 'getPool',
-          args: [tokenA, tokenB, fee]
-        });
-  
         const poolAddressResult = await this.safeCall({
           to: CONTRACTS.UniswapV3Factory,
-          data: getPoolCalldata
+          data: encodeFunctionData({ abi: factoryABI, functionName: 'getPool', args: [tokenA, tokenB, fee] })
         });
-  
-        const decoded = decodeFunctionResult({
-          abi: factoryABI,
-          functionName: 'getPool',
-          data: poolAddressResult.data
-        });
-  
+
+        const decoded = decodeFunctionResult({ abi: factoryABI, functionName: 'getPool', data: poolAddressResult.data });
         const poolAddress = Array.isArray(decoded) ? decoded[0] : decoded;
-  
-        const isZeroAddress = 
-          !poolAddress || 
-          poolAddress === '0x' ||
-          poolAddress === '0x0' ||
-          poolAddress.toLowerCase() === '0x0000000000000000000000000000000000000000' ||
-          BigInt(poolAddress) === 0n;
-  
+
+        const isZeroAddress = !poolAddress || poolAddress === '0x' || poolAddress.toLowerCase() === '0x0000000000000000000000000000000000000000' || BigInt(poolAddress) === 0n;
+
         if (isZeroAddress) {
           console.log(`  ❌ Fee ${fee}: No pool exists`);
           continue;
         }
-  
+
         console.log(`  ✅ Fee ${fee}: Pool found at ${poolAddress}`);
-  
-        // Check liquidity
-        let liquidity;
-        try {
-          const liquidityCalldata = encodeFunctionData({
-            abi: poolABI,
-            functionName: 'liquidity',
-            args: []
-          });
-  
-          const liquidityResult = await this.safeCall({
-            to: poolAddress,
-            data: liquidityCalldata
-          });
-  
-          const liquidityDecoded = decodeFunctionResult({
-            abi: poolABI,
-            functionName: 'liquidity',
-            data: liquidityResult.data
-          });
-  
-          liquidity = Array.isArray(liquidityDecoded) ? liquidityDecoded[0] : liquidityDecoded;
-        } catch (error) {
-          console.log(`  ⚠️ Fee ${fee}: Could not check liquidity - ${error.message}`);
-          continue;
-        }
-  
+
+        const liquidityResult = await this.safeCall({
+          to: poolAddress,
+          data: encodeFunctionData({ abi: poolABI, functionName: 'liquidity', args: [] })
+        });
+
+        const liquidityDecoded = decodeFunctionResult({ abi: poolABI, functionName: 'liquidity', data: liquidityResult.data });
+        const liquidity = Array.isArray(liquidityDecoded) ? liquidityDecoded[0] : liquidityDecoded;
+
         if (liquidity && liquidity > 0n) {
           console.log(`  ✅ Fee ${fee}: Has liquidity ${liquidity.toString()}`);
           poolsFound.push({ fee, liquidity, poolAddress });
-        } else {
-          console.log(`  ⚠️ Fee ${fee}: Pool exists but has zero liquidity`);
         }
-  
+
       } catch (error) {
         console.log(`  ❌ Fee ${fee}: Error - ${error.message}`);
         continue;
       }
     }
-  
+
     if (poolsFound.length === 0) {
       throw new Error('No liquidity pools found for this token pair');
     }
-  
-    // Sort by liquidity descending
-    poolsFound.sort((a, b) => {
-      if (a.liquidity > b.liquidity) return -1;
-      if (a.liquidity < b.liquidity) return 1;
-      return 0;
-    });
-  
+
+    poolsFound.sort((a, b) => (a.liquidity > b.liquidity ? -1 : 1));
+
     const bestPool = poolsFound[0];
-    console.log(`🏆 Best pool: Fee ${bestPool.fee} with liquidity ${bestPool.liquidity.toString()} at ${bestPool.poolAddress}`);
+    console.log(`🏆 Best pool: Fee ${bestPool.fee} with liquidity ${bestPool.liquidity.toString()}`);
     
     return bestPool;
-  }
-
-
-  /**
-   * Calculate actual slippage from execution
-   */
-  calculateActualSlippage(swap) {
-    if (!swap.quote || swap.quote.amountOut === 0n) return 0;
-    
-    const expectedOutput = Number(formatUnits(swap.quote.amountOut, swap.params.tokenOutDecimals));
-    const actualOutput = Number(formatUnits(swap.actualOutput, swap.params.tokenOutDecimals));
-    
-    return ((expectedOutput - actualOutput) / expectedOutput) * 100;
   }
 
   /**
@@ -835,21 +535,21 @@ class SwapExecutorService {
     try {
       const swapTopic = keccak256('Swap(address,address,int256,int256,uint160,uint128,int24)');
       const swapLog = receipt.logs.find(log => log.topics[0] === swapTopic);
-  
+
       if (!swapLog) {
         console.warn('No Swap event found in receipt');
         return { amountOut: 0n, amountIn: 0n };
       }
-  
+
       const decoded = decodeEventLog({
         abi: UniswapV3PoolABI,
         data: swapLog.data,
         topics: swapLog.topics
       });
-  
+
       const amount0 = decoded.args.amount0;
       const amount1 = decoded.args.amount1;
-  
+
       return {
         amountIn: amount0 < 0n ? -amount0 : amount1 < 0n ? -amount1 : 0n,
         amountOut: amount0 > 0n ? amount0 : amount1 > 0n ? amount1 : 0n
@@ -865,181 +565,69 @@ class SwapExecutorService {
    */
   validateSwapParams(params) {
     const errors = [];
-  
-    // ==========================================
-    // 1) INLINE NORMALIZE TOKEN helper (SAFE)
-    // ==========================================
+
     const normalizeToken = (token) => {
-      // token can be: symbol ("MON"), address, null, or zero address
-      if (!token) {
-        // null or undefined => treat as native MON
-        return SUPPORTED_TOKENS.MON || null;
-      }
-  
+      if (!token) return SUPPORTED_TOKENS.MON || null;
       const tokenStr = String(token).trim();
-  
-      // If it's "MON" / "USDC" / etc.
-      const symbolMatch = Object.keys(SUPPORTED_TOKENS).find(
-        (key) => key.toLowerCase() === tokenStr.toLowerCase()
-      );
-      if (symbolMatch) {
-        return SUPPORTED_TOKENS[symbolMatch];
-      }
-  
-      // If zero address or empty => treat as MON/native
+      const symbolMatch = Object.keys(SUPPORTED_TOKENS).find(key => key.toLowerCase() === tokenStr.toLowerCase());
+      if (symbolMatch) return SUPPORTED_TOKENS[symbolMatch];
       const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-      if (
-        tokenStr === "" ||
-        tokenStr.toLowerCase() === ZERO_ADDR
-      ) {
-        return SUPPORTED_TOKENS.MON;
-      }
-  
-      // Otherwise assume address → find in SUPPORTED_TOKENS
+      if (tokenStr === "" || tokenStr.toLowerCase() === ZERO_ADDR) return SUPPORTED_TOKENS.MON;
       const lowerAddr = tokenStr.toLowerCase();
-      const found = Object.values(SUPPORTED_TOKENS).find(
-        (t) => t.address && t.address.toLowerCase() === lowerAddr
-      );
+      const found = Object.values(SUPPORTED_TOKENS).find(t => t.address && t.address.toLowerCase() === lowerAddr);
       return found || null;
     };
-  
-    // ==========================================
-    // 2) Resolve Real On-Chain Address
-    //    (MON/native => WMON)
-    // ==========================================
+
     const resolveAddress = (tokenInfo) => {
       if (!tokenInfo) return null;
-  
-      // If token isNative, use its wrapped (WMON)
-      if (tokenInfo.isNative) {
-        return SUPPORTED_TOKENS.WMON.address;
-      }
+      if (tokenInfo.isNative) return SUPPORTED_TOKENS.WMON.address;
       return tokenInfo.address;
     };
-  
-    // ==========================================
-    // 3) SMART ACCOUNT VALIDATION
-    // ==========================================
+
+    // Smart account validation
     if (!params.smartAccount) {
       errors.push("Smart account object is missing");
     } else {
-      if (!params.smartAccount.address) {
-        errors.push("Smart account address is missing");
-      } else if (!validateAddress(params.smartAccount.address).isValid) {
-        errors.push("Invalid smart account address format");
-      }
-  
-      if (!params.smartAccount.account) {
-        errors.push(
-          "Smart account instance (account property) is missing - account may need rehydration"
-        );
-      }
+      if (!params.smartAccount.address) errors.push("Smart account address is missing");
+      if (!params.smartAccount.account) errors.push("Smart account instance missing");
     }
-  
-    // ==========================================
-    // 4) NORMALIZE TOKENS
-    // ==========================================
+
+    // Token validation
     const tokenInInfo = normalizeToken(params.tokenIn);
     const tokenOutInfo = normalizeToken(params.tokenOut);
-  
-    if (!tokenInInfo) {
-      errors.push("Invalid or unsupported tokenIn");
-    }
-    if (!tokenOutInfo) {
-      errors.push("Invalid or unsupported tokenOut");
-    }
-  
+
+    if (!tokenInInfo) errors.push("Invalid or unsupported tokenIn");
+    if (!tokenOutInfo) errors.push("Invalid or unsupported tokenOut");
+
     if (tokenInInfo && tokenOutInfo) {
       const tokenInAddr = resolveAddress(tokenInInfo);
       const tokenOutAddr = resolveAddress(tokenOutInfo);
-  
-      if (!tokenInAddr) {
-        errors.push("tokenIn address resolution failed");
+
+      if (!tokenInAddr) errors.push("tokenIn address resolution failed");
+      if (!tokenOutAddr) errors.push("tokenOut address resolution failed");
+
+      if (tokenInAddr && tokenOutAddr && tokenInAddr.toLowerCase() === tokenOutAddr.toLowerCase()) {
+        errors.push("TokenIn and tokenOut must be different");
       }
-      if (!tokenOutAddr) {
-        errors.push("tokenOut address resolution failed");
-      }
-  
-      if (tokenInAddr && tokenOutAddr) {
-        const inLower = tokenInAddr.toLowerCase();
-        const outLower = tokenOutAddr.toLowerCase();
-  
-        // Must be different tokens
-        if (inLower === outLower) {
-          errors.push("TokenIn and tokenOut must be different");
-        }
-  
-        // Validate address format
-        if (!validateAddress(inLower).isValid) {
-          errors.push("Invalid tokenIn address format");
-        }
-        if (!validateAddress(outLower).isValid) {
-          errors.push("Invalid tokenOut address format");
-        }
-  
-        // Ensure supported
-        const tokenInSupported = Object.values(SUPPORTED_TOKENS).some(
-          (t) => t.address && t.address.toLowerCase() === inLower
-        );
-        if (!tokenInSupported) {
-          errors.push("TokenIn not supported");
-        }
-  
-        const tokenOutSupported = Object.values(SUPPORTED_TOKENS).some(
-          (t) => t.address && t.address.toLowerCase() === outLower
-        );
-        if (!tokenOutSupported) {
-          errors.push("TokenOut not supported");
-        }
-  
-        // Validate amount
-        if (!params.amountIn || params.amountIn === 0n) {
-          errors.push("AmountIn must be greater than zero");
-        } else {
-          const { isValid } = validateTokenAmount(
-            formatUnits(params.amountIn, tokenInInfo.decimals),
-            {
-              decimals: tokenInInfo.decimals,
-              minAmount: tokenInInfo.minAmount || 0.001,
-              symbol: tokenInInfo.symbol,
-            }
-          );
-          if (!isValid) {
-            errors.push("Invalid amountIn");
-          }
-        }
+
+      // Amount validation
+      if (!params.amountIn || params.amountIn === 0n) {
+        errors.push("AmountIn must be greater than zero");
       }
     }
-  
-    // ==========================================
-    // 5) RECIPIENT VALIDATION
-    // ==========================================
+
+    // Recipient validation
     if (!params.recipient) {
       errors.push("Recipient address is missing");
     } else if (!validateAddress(params.recipient).isValid) {
       errors.push("Invalid recipient address");
     }
-  
-    // ==========================================
-    // 6) DEBUG LOG IF FAIL
-    // ==========================================
-    if (errors.length > 0) {
-      console.error("🔍 Validation failed. SmartAccount structure:", {
-        hasSmartAccount: !!params.smartAccount,
-        hasAddress: !!params.smartAccount?.address,
-        hasAccount: !!params.smartAccount?.account,
-        smartAccountKeys: params.smartAccount
-          ? Object.keys(params.smartAccount)
-          : [],
-      });
-    }
-  
+
     return {
       isValid: errors.length === 0,
-      errors,
+      errors
     };
   }
-  
 
   /**
    * Validate contract addresses
@@ -1061,13 +649,13 @@ class SwapExecutorService {
       }
     }
 
-    console.log('All Uniswap V3 contracts validated successfully');
+    console.log('✅ All Uniswap V3 contracts validated');
   }
 
   generateSwapId(params) {
     const key = `${params.tokenIn}-${params.tokenOut}-${params.amountIn}-${Date.now()}`;
-    const encoded = safeBase64Encode(key);
-    return `swap_${encoded.replace(/[^a-zA-Z0-9]/g, '').substring(0, 32)}`;
+    const encoded = btoa(key).replace(/[^a-zA-Z0-9]/g, '').substring(0, 32);
+    return `swap_${encoded}`;
   }
 
   recordSwapHistory(swap) {
@@ -1083,9 +671,7 @@ class SwapExecutorService {
       timestamp: swap.completedAt,
       amountIn: swap.params.amountIn,
       amountOut: swap.actualOutput,
-      slippage: swap.slippage,
       gasUsed: swap.gasUsed,
-      gasCost: swap.gasCost,
       executionTime: swap.completedAt - swap.startedAt,
       status: swap.status
     });
@@ -1095,10 +681,6 @@ class SwapExecutorService {
     }
   }
 
-  async delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
   getActiveSwaps() {
     return Array.from(this.activeSwaps.values()).map(swap => ({
       id: swap.id,
@@ -1106,38 +688,8 @@ class SwapExecutorService {
       amountIn: formatTokenAmount(swap.params.amountIn, swap.params.tokenInDecimals),
       status: swap.status,
       startedAt: swap.startedAt,
-      duration: Date.now() - swap.startedAt,
-      retryCount: swap.retryCount
+      duration: Date.now() - swap.startedAt
     }));
-  }
-
-  async checkLiquidity(tokenA, tokenB) {
-    try {
-      const testAmount = parseUnits('1', 18);
-      const quoteResult = await this.getSwapQuote({
-        tokenIn: tokenA,
-        tokenOut: tokenB,
-        amountIn: testAmount
-      });
-
-      if (!quoteResult.success) {
-        return {
-          sufficient: false,
-          reason: 'No pool exists'
-        };
-      }
-
-      return {
-        sufficient: true,
-        feeTier: quoteResult.quote.feeTier
-      };
-
-    } catch (error) {
-      return {
-        sufficient: false,
-        reason: `Liquidity check failed: ${error.message}`
-      };
-    }
   }
 
   getServiceHealth() {
@@ -1160,60 +712,7 @@ class SwapExecutorService {
         totalSwaps: totalSwaps24h,
         successfulSwaps: successfulSwaps24h,
         successRate: totalSwaps24h > 0 ? (successfulSwaps24h / totalSwaps24h) * 100 : 0
-      },
-      supportedPairs: this.swapHistory.size
-    };
-  }
-
-  destroy() {
-    this.activeSwaps.clear();
-    this.swapHistory.clear();
-    this.gasEstimateCache.clear();
-    this.initialized = false;
-    
-    console.log('SwapExecutorService destroyed');
-  }
-}
-
-/**
- * Lightweight gas estimation for swaps
- */
-export async function estimateSwapGas({ tokenIn, tokenOut, amountIn }) {
-  try {
-    const swapCalldata = encodeFunctionData({
-      abi: SWAP_ROUTER_ABI,
-      functionName: 'exactInputSingle',
-      args: [{
-        tokenIn,
-        tokenOut,
-        fee: FEE_TIERS.MEDIUM,
-        recipient: CONTRACTS.SwapRouter02,
-        deadline: Math.floor(Date.now() / 1000) + 300,
-        amountIn,
-        amountOutMinimum: 0n,
-        sqrtPriceLimitX96: 0n
-      }]
-    });
-
-    const gasEstimate = await gasEstimator.estimateOperationGas('uniswap_swap', {
-      calldata: swapCalldata,
-      to: CONTRACTS.SwapRouter02,
-      value: 0n
-    });
-
-    return {
-      success: true,
-      gasLimit: gasEstimate.gasLimit,
-      gasPrice: gasEstimate.gasPrice,
-      totalGasCost: gasEstimate.totalCost
-    };
-  } catch (error) {
-    console.warn('[swapExecutor] estimateSwapGas failed, using fallback:', error);
-    return {
-      success: false,
-      gasLimit: 1_000_000n,
-      gasPrice: 1n,
-      totalGasCost: 0n
+      }
     };
   }
 }
@@ -1221,26 +720,7 @@ export async function estimateSwapGas({ tokenIn, tokenOut, amountIn }) {
 // Create singleton instance
 const swapExecutor = new SwapExecutorService();
 
-// Helper functions for common operations
-export const executeSwap = (swapParams, options) => 
-  swapExecutor.executeSwap(swapParams, options);
-
-export const getSwapQuote = (swapParams, options) => 
-  swapExecutor.getSwapQuote(swapParams, options);
-
-export const ensureTokenApproval = (swapParams, options) => 
-  swapExecutor.ensureTokenApproval(swapParams, options);
-
-export const getActiveSwaps = () => 
-  swapExecutor.getActiveSwaps();
-
-export const checkLiquidity = (tokenA, tokenB) => 
-  swapExecutor.checkLiquidity(tokenA, tokenB);
-
-export const getSwapServiceHealth = () => 
-  swapExecutor.getServiceHealth();
-
-// Export main class, singleton, and constants
+// Export
 export { 
   SwapExecutorService,
   swapExecutor,
@@ -1248,7 +728,7 @@ export {
   FEE_TIERS,
 };
 
-// ✅ Automatically initialize the singleton on import
+// Auto-initialize
 (async () => {
   try {
     console.log('Initializing SwapExecutorService...');
